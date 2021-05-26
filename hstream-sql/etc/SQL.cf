@@ -21,25 +21,54 @@ INSERT INTO demoStream (temperature, humidity) VALUES (30, 75);
 
 --------------------------------------------------------------------------------
 
+PInteger.  PNInteger ::= "+" Integer ;
+IPInteger. PNInteger ::=     Integer ;
+NInteger.  PNInteger ::= "-" Integer ;
+
+PDouble.  PNDouble ::= "+" Double ;
+IPDouble. PNDouble ::=     Double ;
+NDouble.  PNDouble ::= "-" Double ;
+
+token SString '\'' char+ '\'' ;
+--------------------------------------------------------------------------------
+
 comment "//" ;
 comment "/*" "*/" ;
+
+entrypoints SQL ;
 
 QSelect. SQL ::= Select ";" ;
 QCreate. SQL ::= Create ";" ;
 QInsert. SQL ::= Insert ";" ;
+QShow.   SQL ::= ShowQ  ";" ;
+QDrop.   SQL ::= Drop   ";" ;
 
 ---- Create Query
-DCreate.  Create ::= "CREATE" "STREAM" Ident "WITH" "(" [StreamOption] ")" ;
+DCreate.  Create ::= "CREATE" "STREAM" Ident ;
+CreateOp. Create ::= "CREATE" "STREAM" Ident "WITH" "(" [StreamOption] ")" ;
 separator StreamOption "," ;
-CreateAs. Create ::= "CREATE" "STREAM" Ident "AS" Select "WITH" "(" [StreamOption] ")" ;
+CreateAs. Create ::= "CREATE" "STREAM" Ident "AS" Select ;
+CreateAsOp. Create ::= "CREATE" "STREAM" Ident "AS" Select "WITH" "(" [StreamOption] ")" ;
 
 -- OptionTopic.  StreamOption ::= "TOPIC"  "=" String ;
-OptionFormat. StreamOption ::= "FORMAT" "=" String ;
+-- OptionFormat. StreamOption ::= "FORMAT" "=" String ;
+OptionRepFactor. StreamOption ::= "REPLICATE" "=" PNInteger ;
 
 ---- Insert Query
 DInsert. Insert ::= "INSERT" "INTO" Ident "(" [Ident] ")" "VALUES" "(" [ValueExpr] ")" ;
 separator Ident "," ;
 separator ValueExpr "," ;
+InsertBinary. Insert ::= "INSERT" "INTO" Ident "VALUES" String ;
+InsertJson.   Insert ::= "INSERT" "INTO" Ident "VALUES" SString ;
+
+---- Show Query
+DShow. ShowQ ::= "SHOW" ShowOption ;
+ShowQueries. ShowOption ::= "QUERIES" ;
+ShowStreams. ShowOption ::= "STREAMS" ;
+
+--- Drop Query
+DDrop.  Drop ::= "DROP" "STREAM" Ident ;
+DropIf. Drop ::= "DROP" "STREAM" "IF" "EXIST" Ident ;
 
 ---- Select Query
 DSelect. Select ::= Sel From Where GroupBy Having "EMIT" "CHANGES" ;
@@ -91,23 +120,32 @@ DHaving.      Having ::= "HAVING" SearchCond ;
 --------------------------------------------------------------------------------
 
 ---- Value Expression
+-- Boolean Expr
+ExprOr.  ValueExpr  ::= ValueExpr  "||" ValueExpr1 ;
+ExprAnd. ValueExpr1 ::= ValueExpr1 "&&" ValueExpr2 ;
+
 -- Arith Expr
-ExprAdd. ValueExpr  ::= ValueExpr  "+" ValueExpr1 ;
-ExprSub. ValueExpr  ::= ValueExpr  "-" ValueExpr1 ;
-ExprMul. ValueExpr1 ::= ValueExpr1 "*" ValueExpr2 ;
+ExprAdd. ValueExpr2 ::= ValueExpr2 "+" ValueExpr3 ;
+ExprSub. ValueExpr2 ::= ValueExpr2 "-" ValueExpr3 ;
+ExprMul. ValueExpr3 ::= ValueExpr3 "*" ValueExpr4 ;
 
 -- Scalar Numeric Type
-ExprInt. ValueExpr2 ::= Integer ;
-ExprNum. ValueExpr2 ::= Double  ;
+ExprInt. ValueExpr4 ::= PNInteger ;
+ExprNum. ValueExpr4 ::= PNDouble  ;
 
 -- Plain String
-ExprString. ValueExpr2 ::= String ;
+ExprString. ValueExpr4 ::= String ;
+
+-- Boolean Type
+BoolTrue.  Boolean ::= "TRUE"  ;
+BoolFalse. Boolean ::= "FALSE" ;
+ExprBool. ValueExpr4 ::= Boolean ;
 
 -- Date, Time and Interval
-DDate. Date ::= "DATE" Integer "-" Integer "-" Integer ;
-DTime. Time ::= "TIME" Integer ":" Integer ":" Integer ;
-ExprDate. ValueExpr2 ::= Date ;
-ExprTime. ValueExpr2 ::= Time ;
+DDate. Date ::= "DATE" PNInteger "-" PNInteger "-" PNInteger ;
+DTime. Time ::= "TIME" PNInteger ":" PNInteger ":" PNInteger ;
+ExprDate. ValueExpr4 ::= Date ;
+ExprTime. ValueExpr4 ::= Time ;
 
 TimeUnitYear.  TimeUnit ::= "YEAR"   ;
 TimeUnitMonth. TimeUnit ::= "MONTH"  ;
@@ -116,8 +154,8 @@ TimeUnitDay.   TimeUnit ::= "DAY"    ;
 TimeUnitMin.   TimeUnit ::= "MINUTE" ;
 TimeUnitSec.   TimeUnit ::= "SECOND" ;
 
-DInterval. Interval ::= "INTERVAL" Integer TimeUnit ;
-ExprInterval. ValueExpr2 ::= Interval ;
+DInterval. Interval ::= "INTERVAL" PNInteger TimeUnit ;
+ExprInterval. ValueExpr4 ::= Interval ;
 
 -- Non-Scalar Type (Array and Map)
 ExprArr. ValueExpr ::= "[" [ValueExpr] "]" ;
@@ -130,8 +168,8 @@ DLabelledValueExpr. LabelledValueExpr ::= Ident ":" ValueExpr ;
 ColNameSimple. ColName ::= Ident ;
 ColNameStream. ColName ::= Ident "." Ident ;
 ColNameInner.  ColName ::= ColName "[" Ident "]" ;
-ColNameIndex.  ColName ::= ColName "[" Integer "]" ;
-ExprColName. ValueExpr2 ::= ColName ;
+ColNameIndex.  ColName ::= ColName "[" PNInteger "]" ;
+ExprColName. ValueExpr4 ::= ColName ;
 
 -- Set Functions
 SetFuncCountAll. SetFunc ::= "COUNT(*)" ;
@@ -140,9 +178,56 @@ SetFuncAvg.      SetFunc ::= "AVG"   "(" ValueExpr ")" ;
 SetFuncSum.      SetFunc ::= "SUM"   "(" ValueExpr ")" ;
 SetFuncMax.      SetFunc ::= "MAX"   "(" ValueExpr ")" ;
 SetFuncMin.      SetFunc ::= "MIN"   "(" ValueExpr ")" ;
-ExprSetFunc. ValueExpr2 ::= SetFunc ;
+ExprSetFunc. ValueExpr4 ::= SetFunc ;
 
-coercions ValueExpr 2 ;
+-- Scalar Functions
+ScalarFuncSin.   ScalarFunc ::= "SIN"   "(" ValueExpr ")" ;
+ScalarFuncSinh.  ScalarFunc ::= "SINH"  "(" ValueExpr ")" ;
+ScalarFuncAsin.  ScalarFunc ::= "ASIN"  "(" ValueExpr ")" ;
+ScalarFuncAsinh. ScalarFunc ::= "ASINH" "(" ValueExpr ")" ;
+ScalarFuncCos.   ScalarFunc ::= "COS"   "(" ValueExpr ")" ;
+ScalarFuncCosh.  ScalarFunc ::= "COSH"  "(" ValueExpr ")" ;
+ScalarFuncAcos.  ScalarFunc ::= "ACOS"  "(" ValueExpr ")" ;
+ScalarFuncAcosh. ScalarFunc ::= "ACOSH" "(" ValueExpr ")" ;
+ScalarFuncTan.   ScalarFunc ::= "TAN"   "(" ValueExpr ")" ;
+ScalarFuncTanh.  ScalarFunc ::= "TANH"  "(" ValueExpr ")" ;
+ScalarFuncAtan.  ScalarFunc ::= "ATAN"  "(" ValueExpr ")" ;
+ScalarFuncAtanh. ScalarFunc ::= "ATANH" "(" ValueExpr ")" ;
+
+ScalarFuncAbs.   ScalarFunc ::= "ABS"   "(" ValueExpr ")" ;
+ScalarFuncCeil.  ScalarFunc ::= "CEIL"  "(" ValueExpr ")" ;
+ScalarFuncFloor. ScalarFunc ::= "FLOOR" "(" ValueExpr ")" ;
+ScalarFuncRound. ScalarFunc ::= "ROUND" "(" ValueExpr ")" ;
+
+ScalarFuncSqrt.  ScalarFunc ::= "SQRT"  "(" ValueExpr ")" ;
+ScalarFuncLog.   ScalarFunc ::= "LOG"   "(" ValueExpr ")" ;
+ScalarFuncLog2.  ScalarFunc ::= "LOG2"  "(" ValueExpr ")" ;
+ScalarFuncLog10. ScalarFunc ::= "LOG10" "(" ValueExpr ")" ;
+ScalarFuncExp.   ScalarFunc ::= "EXP"   "(" ValueExpr ")" ;
+
+ScalarFuncIsInt.   ScalarFunc ::= "IS_INT"   "(" ValueExpr ")" ;
+ScalarFuncIsFloat. ScalarFunc ::= "IS_FLOAT" "(" ValueExpr ")" ;
+ScalarFuncIsNum.   ScalarFunc ::= "IS_NUM"   "(" ValueExpr ")" ;
+ScalarFuncIsBool.  ScalarFunc ::= "IS_BOOL"  "(" ValueExpr ")" ;
+ScalarFuncIsStr.   ScalarFunc ::= "IS_STR"   "(" ValueExpr ")" ;
+ScalarFuncIsMap.   ScalarFunc ::= "IS_MAP"   "(" ValueExpr ")" ;
+ScalarFuncIsArr.   ScalarFunc ::= "IS_ARRAY" "(" ValueExpr ")" ;
+ScalarFuncIsDate.  ScalarFunc ::= "IS_DATE"  "(" ValueExpr ")" ;
+ScalarFuncIsTime.  ScalarFunc ::= "IS_TIME"  "(" ValueExpr ")" ;
+
+ScalarFuncToStr.  ScalarFunc ::= "TO_STR"  "(" ValueExpr ")" ;
+
+ScalarFuncToLower. ScalarFunc ::= "TO_LOWER"   "(" ValueExpr ")" ;
+ScalarFuncToUpper. ScalarFunc ::= "TO_UPPER"   "(" ValueExpr ")" ;
+ScalarFuncTrim.    ScalarFunc ::= "TRIM"       "(" ValueExpr ")" ;
+ScalarFuncLTrim.   ScalarFunc ::= "LEFT_TRIM"  "(" ValueExpr ")" ;
+ScalarFuncRTrim.   ScalarFunc ::= "RIGHT_TRIM" "(" ValueExpr ")" ;
+ScalarFuncRev.     ScalarFunc ::= "REVERSE"    "(" ValueExpr ")" ;
+ScalarFuncStrlen.  ScalarFunc ::= "STRLEN"     "(" ValueExpr ")" ;
+
+ExprScalarFunc. ValueExpr ::= ScalarFunc ;
+
+coercions ValueExpr 4 ;
 
 
 ---- Search Condition

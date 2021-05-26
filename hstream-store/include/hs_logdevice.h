@@ -1,4 +1,8 @@
 #include <HsFFI.h>
+#include <rts/Types.h>
+#include <rts/prof/CCS.h>
+#include <rts/storage/Closures.h>
+
 #include <iostream>
 #include <limits.h>
 #include <stdbool.h>
@@ -10,7 +14,13 @@
 #include <folly/Singleton.h>
 #include <folly/String.h>
 #include <folly/io/async/AsyncSocket.h>
+
 #include <logdevice/admin/if/gen-cpp2/AdminAPI.h>
+#include <logdevice/common/Processor.h>
+#include <logdevice/common/RSMBasedVersionedConfigStore.h>
+#include <logdevice/common/VersionedConfigStore.h>
+#include <logdevice/common/checks.h>
+#include <logdevice/common/debug.h>
 #include <logdevice/include/CheckpointStore.h>
 #include <logdevice/include/CheckpointStoreFactory.h>
 #include <logdevice/include/CheckpointedReaderBase.h>
@@ -26,6 +36,8 @@
 #include <logdevice/include/SyncCheckpointedReader.h>
 #include <logdevice/include/debug.h>
 #include <logdevice/include/types.h>
+#include <logdevice/lib/ClientImpl.h>
+
 #include <thrift/lib/cpp/async/TAsyncSSLSocket.h>
 #include <thrift/lib/cpp2/async/HeaderClientChannel.h>
 
@@ -39,27 +51,42 @@ using facebook::logdevice::CheckpointStore;
 using facebook::logdevice::CheckpointStoreFactory;
 using facebook::logdevice::Client;
 using facebook::logdevice::ClientFactory;
+using facebook::logdevice::ClientImpl;
 using facebook::logdevice::ClientSettings;
 using facebook::logdevice::DataRecord;
 using facebook::logdevice::KeyType;
 using facebook::logdevice::logid_t;
 using facebook::logdevice::lsn_t;
 using facebook::logdevice::Payload;
+using facebook::logdevice::Processor;
 using facebook::logdevice::Reader;
+using facebook::logdevice::RSMBasedVersionedConfigStore;
 using facebook::logdevice::SyncCheckpointedReader;
+using facebook::logdevice::vcs_config_version_t;
+using facebook::logdevice::VersionedConfigStore;
 using facebook::logdevice::client::LogAttributes;
-using LogAttributes = facebook::logdevice::logsconfig::LogAttributes;
 using facebook::logdevice::client::LogGroup;
 using LogDirectory = facebook::logdevice::client::Directory;
+using facebook::fb303::cpp2::fb_status;
 using facebook::logdevice::thrift::AdminAPIAsyncClient;
+
+std::string* new_hs_std_string(std::string&& str);
+char* copyString(const std::string& str);
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+std::string* hs_cal_std_string_off(std::string* str, HsInt idx);
+
+// ----------------------------------------------------------------------------
+
+void init_logdevice(void);
+
 typedef int64_t c_timestamp_t;
 typedef uint16_t c_error_code_t;
 typedef uint8_t c_keytype_t;
+typedef uint64_t c_vcs_config_version_t;
 
 struct logdevice_loggroup_t {
   std::unique_ptr<LogGroup> rep;
@@ -70,6 +97,9 @@ struct logdevice_logdirectory_t {
 struct logdevice_client_t {
   std::shared_ptr<Client> rep;
 };
+struct logdevice_vcs_t {
+  std::unique_ptr<VersionedConfigStore> rep;
+};
 struct logdevice_reader_t {
   std::unique_ptr<Reader> rep;
 };
@@ -79,6 +109,7 @@ struct logdevice_sync_checkpointed_reader_t {
 struct logdevice_checkpoint_store_t {
   std::unique_ptr<CheckpointStore> rep;
 };
+
 typedef struct logdevice_admin_async_client_t {
   std::unique_ptr<AdminAPIAsyncClient> rep;
 } logdevice_admin_async_client_t;
@@ -89,6 +120,7 @@ typedef struct thrift_rpc_options_t {
 typedef struct logdevice_loggroup_t logdevice_loggroup_t;
 typedef struct logdevice_logdirectory_t logdevice_logdirectory_t;
 typedef struct logdevice_client_t logdevice_client_t;
+typedef struct logdevice_vcs_t logdevice_vcs_t;
 typedef struct logdevice_checkpoint_store_t logdevice_checkpoint_store_t;
 typedef struct logdevice_reader_t logdevice_reader_t;
 typedef struct logdevice_sync_checkpointed_reader_t
@@ -107,9 +139,16 @@ const c_logid_t C_USER_LOGID_MAX = facebook::logdevice::USER_LOGID_MAX.val();
 const size_t C_LOGID_MAX_BITS = facebook::logdevice::LOGID_BITS;
 
 // LogAttributes
-LogAttributes* new_log_attributes();
+#if __GLASGOW_HASKELL__ < 810
+LogAttributes* new_log_attributes(int replicationFactor, HsInt extras_len,
+                                  StgMutArrPtrs* keys_, StgMutArrPtrs* vals_);
+#else
+LogAttributes* new_log_attributes(int replicationFactor, HsInt extras_len,
+                                  StgArrBytes** keys, StgArrBytes** vals);
+#endif
 void free_log_attributes(LogAttributes* attrs);
-void with_replicationFactor(LogAttributes* attrs, int value);
+bool exist_log_attrs_extras(LogAttributes* attrs, char* key);
+std::string* get_log_attrs_extra(LogAttributes* attrs, char* key);
 
 // LogSequenceNumber
 typedef uint64_t c_lsn_t;
@@ -161,13 +200,54 @@ const c_logdevice_dbg_level C_DBG_SPEW =
 void set_dbg_level(c_logdevice_dbg_level level);
 int dbg_use_fd(int fd);
 
-// AppendCallbackData
+// ----------------------------------------------------------------------------
+// callbacks
+
 typedef struct logdevice_append_cb_data_t {
   c_error_code_t st;
   c_logid_t logid;
   c_lsn_t lsn;
   c_timestamp_t timestamp;
 } logdevice_append_cb_data_t;
+
+typedef struct make_directory_cb_data_t {
+  c_error_code_t st;
+  logdevice_logdirectory_t* directory;
+  char* failure_reason;
+} make_directory_cb_data_t;
+
+typedef struct make_loggroup_cb_data_t {
+  c_error_code_t st;
+  logdevice_loggroup_t* loggroup;
+  char* failure_reason;
+} make_loggroup_cb_data_t;
+
+
+typedef struct logsconfig_status_cb_data_t {
+  c_error_code_t st;
+  uint64_t version;
+  char* failure_reason;
+} logsconfig_status_cb_data_t;
+
+// The status codes may be one of the following if the callback is invoked:
+//   OK
+//   NOTFOUND: key not found, corresponds to ZNONODE
+//   VERSION_MISMATCH: corresponds to ZBADVERSION
+//   ACCESS: permission denied, corresponds to ZNOAUTH
+//   UPTODATE: current version is up-to-date for conditional get
+//   AGAIN: transient errors (including connection closed ZCONNECTIONLOSS,
+//          timed out ZOPERATIONTIMEOUT, throttled ZWRITETHROTTLE)
+typedef struct vcs_value_callback_data_t {
+  c_error_code_t st;
+  HsInt val_len;
+  const char* value;
+} vcs_value_callback_data_t;
+typedef struct vcs_write_callback_data_t {
+  c_error_code_t st;
+  c_vcs_config_version_t version;
+  HsInt val_len;
+  const char* value;
+} vcs_write_callback_data_t;
 
 // ----------------------------------------------------------------------------
 // Client
@@ -188,6 +268,9 @@ facebook::logdevice::Status ld_client_set_settings(logdevice_client_t* client,
                                                    const char* name,
                                                    const char* value);
 
+HsInt ld_client_trim(logdevice_client_t* client, c_logid_t logid, c_lsn_t lsn,
+                     HsStablePtr mvar, HsInt cap, c_error_code_t* st_out);
+
 // ----------------------------------------------------------------------------
 // LogConfigType
 
@@ -199,11 +282,25 @@ facebook::logdevice::Status
 ld_client_make_directory_sync(logdevice_client_t* client, const char* path,
                               bool mk_intermediate_dirs, LogAttributes* attrs,
                               logdevice_logdirectory_t** logdir_ret);
+facebook::logdevice::Status
+ld_client_make_directory(logdevice_client_t* client, const char* path,
+                         bool mk_intermediate_dirs, LogAttributes* attrs,
+                         HsStablePtr mvar, HsInt cap,
+                         make_directory_cb_data_t* data);
 
-void* free_lodevice_logdirectory(logdevice_logdirectory_t* dir);
+void free_logdevice_logdirectory(logdevice_logdirectory_t* dir);
 
 const char* ld_logdirectory_get_name(logdevice_logdirectory_t* dir);
 uint64_t ld_logdirectory_get_version(logdevice_logdirectory_t* dir);
+
+facebook::logdevice::Status
+ld_client_get_directory_sync(logdevice_client_t* client, const char* path,
+                             logdevice_logdirectory_t** logdir_result);
+facebook::logdevice::Status
+ld_client_get_directory(logdevice_client_t* client, const char* path,
+                        HsStablePtr mvar, HsInt cap,
+                        facebook::logdevice::Status* st_out,
+                        logdevice_logdirectory_t** logdir_result);
 
 // LogGroup
 facebook::logdevice::Status ld_client_make_loggroup_sync(
@@ -211,17 +308,39 @@ facebook::logdevice::Status ld_client_make_loggroup_sync(
     const c_logid_t end_logid, LogAttributes* attrs, bool mk_intermediate_dirs,
     logdevice_loggroup_t** loggroup_result);
 
-void* free_lodevice_loggroup(logdevice_loggroup_t* group);
+facebook::logdevice::Status ld_client_make_loggroup(
+    logdevice_client_t* client, const char* path, const c_logid_t start_logid,
+    const c_logid_t end_logid, LogAttributes* attrs, bool mk_intermediate_dirs,
+    HsStablePtr mvar, HsInt cap, make_loggroup_cb_data_t* data);
+
+void free_logdevice_loggroup(logdevice_loggroup_t* group);
 
 facebook::logdevice::Status
 ld_client_get_loggroup_sync(logdevice_client_t* client, const char* path,
+                            logdevice_loggroup_t** loggroup_result);
+
+void ld_client_get_loggroup(logdevice_client_t* client, const char* path,
+                            HsStablePtr mvar, HsInt cap,
+                            facebook::logdevice::Status* st_out,
                             logdevice_loggroup_t** loggroup_result);
 
 void ld_loggroup_get_range(logdevice_loggroup_t* group, c_logid_t* start,
                            c_logid_t* end);
 const char* ld_loggroup_get_name(logdevice_loggroup_t* group);
 const char* ld_loggroup_get_fully_qualified_name(logdevice_loggroup_t* group);
+const LogAttributes* ld_loggroup_get_attrs(logdevice_loggroup_t* group);
 uint64_t ld_loggroup_get_version(logdevice_loggroup_t* group);
+
+facebook::logdevice::Status ld_client_rename(logdevice_client_t* client,
+                                             const char* from_path,
+                                             const char* to_path,
+                                             HsStablePtr mvar, HsInt cap,
+                                             logsconfig_status_cb_data_t* data);
+
+facebook::logdevice::Status
+ld_client_remove_loggroup(logdevice_client_t* client, const char* path,
+                          HsStablePtr mvar, HsInt cap,
+                          logsconfig_status_cb_data_t* data);
 
 // ----------------------------------------------------------------------------
 // Appender
@@ -261,12 +380,29 @@ logdevice_append_with_attrs_sync(logdevice_client_t* client, c_logid_t logid,
 logdevice_checkpoint_store_t*
 new_file_based_checkpoint_store(const char* root_path);
 
+logdevice_checkpoint_store_t*
+new_rsm_based_checkpoint_store(logdevice_client_t* client, c_logid_t log_id,
+                               int64_t stop_timeout);
+logdevice_checkpoint_store_t*
+new_zookeeper_based_checkpoint_store(logdevice_client_t* client);
+
 void free_checkpoint_store(logdevice_checkpoint_store_t* p);
+
+void checkpoint_store_get_lsn(logdevice_checkpoint_store_t* store,
+                              const char* customer_id, c_logid_t logid,
+                              HsStablePtr mvar, HsInt cap,
+                              facebook::logdevice::Status* st_out,
+                              c_lsn_t* value_out);
 
 facebook::logdevice::Status
 checkpoint_store_get_lsn_sync(logdevice_checkpoint_store_t* store,
                               const char* customer_id, c_logid_t logid,
                               c_lsn_t* value_out);
+
+void checkpoint_store_update_lsn(logdevice_checkpoint_store_t* store,
+                                 const char* customer_id, c_logid_t logid,
+                                 c_lsn_t lsn, HsStablePtr mvar, HsInt cap,
+                                 facebook::logdevice::Status* st_out);
 
 facebook::logdevice::Status
 checkpoint_store_update_lsn_sync(logdevice_checkpoint_store_t* store,
@@ -298,6 +434,9 @@ facebook::logdevice::Status ld_reader_start_reading(logdevice_reader_t* reader,
 facebook::logdevice::Status ld_checkpointed_reader_start_reading(
     logdevice_sync_checkpointed_reader_t* reader, c_logid_t logid,
     c_lsn_t start, c_lsn_t until);
+facebook::logdevice::Status ld_checkpointed_reader_start_reading_from_ckp(
+    logdevice_sync_checkpointed_reader_t* reader, c_logid_t logid,
+    c_lsn_t until);
 
 facebook::logdevice::Status ld_reader_stop_reading(logdevice_reader_t* reader,
                                                    c_logid_t logid);
@@ -327,9 +466,19 @@ facebook::logdevice::Status
 sync_write_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
                        c_logid_t* logids, c_lsn_t* lsns, size_t len);
 
+void write_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
+                       c_logid_t* logids, c_lsn_t* lsns, size_t len,
+                       HsStablePtr mvar, HsInt cap,
+                       facebook::logdevice::Status* st_out);
+
 facebook::logdevice::Status
 sync_write_last_read_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
                                  const c_logid_t* logids, size_t len);
+
+void write_last_read_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
+                                 const c_logid_t* logids, size_t len,
+                                 HsStablePtr mvar, HsInt cap,
+                                 facebook::logdevice::Status* st_out);
 
 // ----------------------------------------------------------------------------
 // Admin Client
@@ -347,7 +496,15 @@ void free_thrift_rpc_options(thrift_rpc_options_t* p);
 std::string* ld_admin_sync_getVersion(logdevice_admin_async_client_t* client,
                                       thrift_rpc_options_t* rpc_options);
 
-// ----------------------------------------------------------------------------
+fb_status ld_admin_sync_getStatus(logdevice_admin_async_client_t* client,
+                                  thrift_rpc_options_t* rpc_options);
+
+int64_t ld_admin_sync_aliveSince(logdevice_admin_async_client_t* client,
+                                 thrift_rpc_options_t* rpc_options);
+
+int64_t ld_admin_sync_getPid(logdevice_admin_async_client_t* client,
+                             thrift_rpc_options_t* rpc_options);
+// ---------------------------------------------------------------------- ------
 
 #ifdef __cplusplus
 } /* end extern "C" */

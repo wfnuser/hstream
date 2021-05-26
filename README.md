@@ -74,11 +74,56 @@ You can reach the HStreamDB community and developers via the following channels:
 
 Please submit any bugs, issues, and feature requests to [hstreamdb/hstream](https://github.com/hstreamdb/hstream/issues).
 
+
+## How to build (for developers only)
+
+**Pre-requirements**
+
+1. Make sure you have Docker installed, and can run `docker` as a non-root user.
+2. You have `python3` installed.
+3. Your can clone Github repository by ssh key.
+
+**Get the source code**
+
+```sh
+git clone --recursive git@github.com:hstreamdb/hstream.git
+cd hstream/
+```
+
+**Update images**
+
+```sh
+script/dev-tools update-images
+```
+
+**Start dev-cluster**
+
+*A dev-cluster is required while running tests. All datas are stored under `your-project-root/local-data/logdevice`*
+
+```sh
+script/dev-tools cluster-start
+```
+
+**Enter in an interactive shell**
+
+```sh
+script/dev-tools shell
+```
+
+**Build as other haskell projects**
+
+*Inside the interactive shell, you have all extra dependencies installed.*
+
+```
+I have no name!@649bc6bb75ed:~$ make
+I have no name!@649bc6bb75ed:~$ cabal build all
+```
+
+
 ## License
 
 HStreamDB is under the BSD 3-Clause license. See the [LICENSE](https://github.com/hstreamdb/hstream/blob/master/LICENSE) file for details.
 
 ## Acknowledgments
 
-- Thanks [winterland](https://github.com/winterland1989) for providing modern Haskell engineering toolkits [Z.Haskell](https://z.haskell.world/).
 - Thanks [LogDevice](https://logdevice.io/) for the powerful storage engine.

@@ -1,9 +1,6 @@
-[submodule "z-data"]
-	path = z-data
-	url = git@github.com:ZHaskell/z-data.git
-[submodule "z-io"]
-	path = z-io
-	url = git@github.com:ZHaskell/z-io.git
-[submodule "z-yaml"]
-	path = z-yaml
-	url = git@github.com:ZHaskell/z-yaml.git
+[submodule "external/gRPC-haskell"]
+	path = external/gRPC-haskell
+	url = git@github.com:hstreamdb/gRPC-haskell.git
+[submodule "external/hsthrift"]
+	path = external/hsthrift
+	url = git@github.com:hstreamdb/hsthrift.git

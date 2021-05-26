@@ -3,57 +3,55 @@
 
 module HStream.Store.TopicSpec (spec) where
 
-import           System.IO.Unsafe        (unsafePerformIO)
-import           System.Random           (newStdGen, randomRs)
+import qualified Data.Map.Strict         as Map
 import           Test.Hspec
-import           Z.Data.CBytes           (CBytes, pack)
 
-import qualified HStream.Store.Exception as E
-import qualified HStream.Store.Stream    as S
+import qualified HStream.Store           as S
+import           HStream.Store.SpecUtils
 
-client :: S.StreamClient
-client = unsafePerformIO $ S.newStreamClient "/data/store/logdevice.conf"
-{-# NOINLINE client #-}
+newRandomTopic :: IO (S.StreamName, S.StreamName)
+newRandomTopic = do
+  topic <- ("/ci/stream/" <>) <$> newRandomName 5
+  newTopic <- ("/ci/stream/" <>) <$> newRandomName 5
+  return (topic, newTopic)
 
 spec :: Spec
 spec = describe "HStream.Store.Topic" $ do
-  simpleSpec
+  (topic, newTopic) <- runIO newRandomTopic
 
-simpleSpec :: Spec
-simpleSpec = context "Simple Create & Delete" $ do
-  it "create & delete topic directory" $ do
-    let attrs = S.TopicAttrs { S.replicationFactor = 0 }
-    topicDirName <- newRandomName 5
-    let topicDir = "ci/" <> topicDirName
-    dir <- S.makeTopicDirectorySync client topicDir attrs True
-    S.syncTopicConfigVersion client =<< (S.topicDirectoryGetVersion dir)
+  it "create topic" $ do
+    print $ "Create a new topic: " <> topic
+    S.doesStreamExists client topic `shouldReturn` False
+    let attrs = S.LogAttrs S.HsLogAttrs { S.logReplicationFactor = 1
+                                        , S.logExtraAttrs = Map.fromList [ ("greet", "hi")
+                                                                         , ("A", "B")
+                                                                         ]
+                                        }
+    S.createStream client topic attrs
+    S.doesStreamExists client topic `shouldReturn` True
 
-    dir' <- S.getTopicDirectorySync client topicDir
-    S.topicDirectoryGetName dir' `shouldReturn` topicDirName
+  it "get loggroup by name or id shoule be equal" $ do
+    name <- S.logGroupGetFullyQualifiedName =<< S.getLogGroup client topic
+    logid <- S.getCLogIDByStreamName client name
+    name' <- S.logGroupGetFullyQualifiedName =<< S.getLogGroupByID client logid
+    name `shouldBe` name'
 
-    version <- S.removeTopicDirectorySync' client topicDir True
-    S.syncTopicConfigVersion client version
-    S.getTopicDirectorySync client topicDir `shouldThrow` notFoundException
+  it "rename topic" $ do
+    print $ "Rename topic " <> topic <> " to " <> newTopic
+    S.renameStream client topic newTopic
+    S.doesStreamExists client topic `shouldReturn` False
+    S.doesStreamExists client newTopic `shouldReturn` True
 
-  it "create & delete topic group sync" $ do
-    let attrs = S.TopicAttrs { S.replicationFactor = 2 }
-    topicGroupName <- newRandomName 5
-    let topicGroup = "ci/stream/" <> topicGroupName
-    let start = S.mkTopicID 1000
-        end   = S.mkTopicID 1000
-    group <- S.makeTopicGroupSync client topicGroup start end attrs True
-    S.syncTopicConfigVersion client =<< (S.topicGroupGetVersion group)
+  it "get/set extra-attrs" $ do
+    logGroup <- S.getLogGroup client newTopic
+    S.logGroupGetExtraAttr logGroup "greet" `shouldReturn` "hi"
+    S.logGroupUpdateExtraAttrs client logGroup $ Map.fromList [("greet", "hello"), ("Alice", "Bob")]
 
-    group' <- S.getTopicGroupSync client topicGroup
-    S.topicGroupGetRange group' `shouldReturn` (S.mkTopicID 1000, S.mkTopicID 1000)
-    S.topicGroupGetName group' `shouldReturn` topicGroupName
+    logGroup_ <- S.getLogGroup client newTopic
+    S.logGroupGetExtraAttr logGroup_ "greet" `shouldReturn` "hello"
+    S.logGroupGetExtraAttr logGroup_ "A" `shouldReturn` "B"
+    S.logGroupGetExtraAttr logGroup_ "Alice" `shouldReturn` "Bob"
 
-    version <- S.removeTopicGroupSync' client topicGroup
-    S.syncTopicConfigVersion client version
-    S.getTopicGroupSync client topicGroup `shouldThrow` notFoundException
-
-notFoundException :: Selector E.NOTFOUND
-notFoundException = const True
-
-newRandomName :: Int -> IO CBytes
-newRandomName n = (pack . take n . randomRs ('a', 'z')) <$> newStdGen
+  it "remove topic" $ do
+    S.removeStream client newTopic
+    S.doesStreamExists client newTopic `shouldReturn` False

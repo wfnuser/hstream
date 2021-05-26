@@ -1,13 +1,7 @@
 cradle:
   cabal:
-    - path: "hstream/src"
-      component: "lib:hstream"
-
-    - path: "hstream/sql-example-mock/Example.hs"
-      component: "hstream:exe:sql-example-mock"
-
-    - path: "hstream/sql-example-logdevice/Example.hs"
-      component: "hstream:exe:sql-example-logdevice"
+    - path: "hstream/client/Main.hs"
+      component: "hstream:exe:hstream-client"
 
     - path: "hstream/test"
       component: "hstream:test:hstream-test"
@@ -18,7 +12,7 @@ cradle:
     - path: "hstream-hesp/test"
       component: "hesp:test:hesp-test"
 
-    - path: "hstream-hesp/./benchmark/Benchmark.hs"
+    - path: "hstream-hesp/benchmark/Benchmark.hs"
       component: "hesp:bench:hesp-benchmark"
 
     - path: "hstream-processing/src"
@@ -51,26 +45,35 @@ cradle:
     - path: "hstream-processing/example/LogDeviceExample0.hs"
       component: "hstream-processing:exe:logdevice-example0"
 
+    - path: "hstream-server/src"
+      component: "lib:hstream-server"
+
+    - path: "hstream-server/generated-src"
+      component: "lib:hstream-server"
+
+    - path: "hstream-server/app"
+      component: "lib:hstream-server"
+
+    - path: "hstream-server/generated-src"
+      component: "lib:hstream-server"
+
+    - path: "hstream-server/app/Server.hs"
+      component: "hstream-server:exe:hstream-server"
+
     - path: "hstream-sql/src"
       component: "lib:hstream-sql"
+
+    - path: "hstream-sql/sql-example-mock/Example.hs"
+      component: "hstream-sql:exe:sql-example-mock"
+
+    - path: "hstream-sql/sql-example-logdevice/Example.hs"
+      component: "hstream-sql:exe:sql-example-logdevice"
+
+    - path: "hstream-store/app/hstore.hs"
+      component: "hstream-store:exe:hstore"
 
     - path: "hstream-store/./"
       component: "lib:hstream-store"
 
     - path: "hstream-store/test"
       component: "hstream-store:test:hstream-store-test"
-
-    - path: "z-data/./"
-      component: "lib:Z-Data"
-
-    - path: "z-data/test/"
-      component: "Z-Data:test:Z-Data-Test"
-
-    - path: "z-io/./"
-      component: "lib:Z-IO"
-
-    - path: "z-io/test/"
-      component: "Z-IO:test:Z-IO-Test"
-
-    - path: "z-yaml/./"
-      component: "lib:Z-YAML"

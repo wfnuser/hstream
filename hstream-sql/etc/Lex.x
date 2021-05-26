@@ -5,6 +5,8 @@
 {-# OPTIONS_GHC -w #-}
 module HStream.SQL.Lex where
 
+import Prelude
+
 import qualified Data.Text
 import qualified Data.Bits
 import Data.Word (Word8)
@@ -20,7 +22,7 @@ $i = [$l $d _ ']     -- identifier character
 $u = [. \n]          -- universal: any character
 
 @rsyms =    -- symbols and non-identifier-like reserved words
-   \; | \( | \) | \, | \= | \* | \+ | \- | \: | \[ | \] | \{ | \} | \. | "COUNT" \( \* \) | \< \> | \< | \> | \< \= | \> \=
+   \+ | \- | \; | \( | \) | \, | \= | \* | \| \| | \& \& | \: | \[ | \] | \{ | \} | \. | "COUNT" \( \* \) | \< \> | \< | \> | \< \= | \> \=
 
 :-
 
@@ -33,6 +35,8 @@ $u = [. \n]          -- universal: any character
 $white+ ;
 @rsyms
     { tok (\p s -> PT p (eitherResIdent TV s)) }
+\' $u + \'
+    { tok (\p s -> PT p (eitherResIdent T_SString s)) }
 
 $l $i*
     { tok (\p s -> PT p (eitherResIdent TV s)) }
@@ -56,6 +60,7 @@ data Tok =
  | TV !Data.Text.Text         -- identifiers
  | TD !Data.Text.Text         -- double precision float literals
  | TC !Data.Text.Text         -- character literals
+ | T_SString !Data.Text.Text
 
  deriving (Eq,Show,Ord)
 
@@ -93,6 +98,7 @@ tokenText t = case t of
   PT _ (TD s)   -> s
   PT _ (TC s)   -> s
   Err _         -> Data.Text.pack "#error"
+  PT _ (T_SString s) -> s
 
 prToken :: Token -> String
 prToken t = Data.Text.unpack (tokenText t)
@@ -103,12 +109,12 @@ eitherResIdent :: (Data.Text.Text -> Tok) -> Data.Text.Text -> Tok
 eitherResIdent tv s = treeFind resWords
   where
   treeFind N = tv s
-  treeFind (B a t left right) | s < a  = treeFind left
-                              | s > a  = treeFind right
-                              | s == a = t
+  treeFind (B a t left right) | (Data.Text.toUpper s) < (Data.Text.toUpper a) = treeFind left
+                              | (Data.Text.toUpper s) > (Data.Text.toUpper a) = treeFind right
+                              | (Data.Text.toUpper s) == (Data.Text.toUpper a) = t
 
 resWords :: BTree
-resWords = b "HOPPING" 32 (b "AND" 16 (b ":" 8 (b "+" 4 (b ")" 2 (b "(" 1 N N) (b "*" 3 N N)) (b "-" 6 (b "," 5 N N) (b "." 7 N N))) (b "<>" 12 (b "<" 10 (b ";" 9 N N) (b "<=" 11 N N)) (b ">" 14 (b "=" 13 N N) (b ">=" 15 N N)))) (b "CREATE" 24 (b "BY" 20 (b "AVG" 18 (b "AS" 17 N N) (b "BETWEEN" 19 N N)) (b "COUNT" 22 (b "CHANGES" 21 N N) (b "COUNT(*)" 23 N N))) (b "FORMAT" 28 (b "DAY" 26 (b "DATE" 25 N N) (b "EMIT" 27 N N)) (b "GROUP" 30 (b "FROM" 29 N N) (b "HAVING" 31 N N))))) (b "SELECT" 48 (b "MIN" 40 (b "INTO" 36 (b "INSERT" 34 (b "INNER" 33 N N) (b "INTERVAL" 35 N N)) (b "LEFT" 38 (b "JOIN" 37 N N) (b "MAX" 39 N N))) (b "ON" 44 (b "MONTH" 42 (b "MINUTE" 41 N N) (b "NOT" 43 N N)) (b "OUTER" 46 (b "OR" 45 N N) (b "SECOND" 47 N N)))) (b "WHERE" 56 (b "TIME" 52 (b "STREAM" 50 (b "SESSION" 49 N N) (b "SUM" 51 N N)) (b "VALUES" 54 (b "TUMBLING" 53 N N) (b "WEEK" 55 N N))) (b "[" 60 (b "WITHIN" 58 (b "WITH" 57 N N) (b "YEAR" 59 N N)) (b "{" 62 (b "]" 61 N N) (b "}" 63 N N)))))
+resWords = b "IS_FLOAT" 56 (b "BY" 28 (b "=" 14 (b "-" 7 (b "*" 4 (b "(" 2 (b "&&" 1 N N) (b ")" 3 N N)) (b "," 6 (b "+" 5 N N) N)) (b "<" 11 (b ":" 9 (b "." 8 N N) (b ";" 10 N N)) (b "<>" 13 (b "<=" 12 N N) N))) (b "AS" 21 (b "ACOS" 18 (b ">=" 16 (b ">" 15 N N) (b "ABS" 17 N N)) (b "AND" 20 (b "ACOSH" 19 N N) N)) (b "ATANH" 25 (b "ASINH" 23 (b "ASIN" 22 N N) (b "ATAN" 24 N N)) (b "BETWEEN" 27 (b "AVG" 26 N N) N)))) (b "FALSE" 42 (b "CREATE" 35 (b "COSH" 32 (b "CHANGES" 30 (b "CEIL" 29 N N) (b "COS" 31 N N)) (b "COUNT(*)" 34 (b "COUNT" 33 N N) N)) (b "EMIT" 39 (b "DAY" 37 (b "DATE" 36 N N) (b "DROP" 38 N N)) (b "EXP" 41 (b "EXIST" 40 N N) N))) (b "INNER" 49 (b "HAVING" 46 (b "FROM" 44 (b "FLOOR" 43 N N) (b "GROUP" 45 N N)) (b "IF" 48 (b "HOPPING" 47 N N) N)) (b "IS_ARRAY" 53 (b "INTERVAL" 51 (b "INSERT" 50 N N) (b "INTO" 52 N N)) (b "IS_DATE" 55 (b "IS_BOOL" 54 N N) N))))) (b "SHOW" 84 (b "MINUTE" 70 (b "LEFT" 63 (b "IS_STR" 60 (b "IS_MAP" 58 (b "IS_INT" 57 N N) (b "IS_NUM" 59 N N)) (b "JOIN" 62 (b "IS_TIME" 61 N N) N)) (b "LOG2" 67 (b "LOG" 65 (b "LEFT_TRIM" 64 N N) (b "LOG10" 66 N N)) (b "MIN" 69 (b "MAX" 68 N N) N))) (b "REPLICATE" 77 (b "OR" 74 (b "NOT" 72 (b "MONTH" 71 N N) (b "ON" 73 N N)) (b "QUERIES" 76 (b "OUTER" 75 N N) N)) (b "SECOND" 81 (b "RIGHT_TRIM" 79 (b "REVERSE" 78 N N) (b "ROUND" 80 N N)) (b "SESSION" 83 (b "SELECT" 82 N N) N)))) (b "TRIM" 98 (b "SUM" 91 (b "STREAM" 88 (b "SINH" 86 (b "SIN" 85 N N) (b "SQRT" 87 N N)) (b "STRLEN" 90 (b "STREAMS" 89 N N) N)) (b "TO_LOWER" 95 (b "TANH" 93 (b "TAN" 92 N N) (b "TIME" 94 N N)) (b "TO_UPPER" 97 (b "TO_STR" 96 N N) N))) (b "WITHIN" 105 (b "WEEK" 102 (b "TUMBLING" 100 (b "TRUE" 99 N N) (b "VALUES" 101 N N)) (b "WITH" 104 (b "WHERE" 103 N N) N)) (b "{" 109 (b "[" 107 (b "YEAR" 106 N N) (b "]" 108 N N)) (b "}" 111 (b "||" 110 N N) N)))))
    where b s n = let bs = Data.Text.pack s
                  in  B bs (TS bs n)
 

@@ -1,62 +1,75 @@
-{-# LANGUAGE DeriveFunctor     #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PolyKinds         #-}
-{-# LANGUAGE RankNTypes        #-}
+{-# LANGUAGE DeriveFunctor       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PolyKinds           #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module HStream.SQL.Validate
   ( Validate (..)
   ) where
 
-import           Control.Monad         (unless, void, when)
-import qualified Data.List             as L
-import           Data.List.Extra       (anySame)
-import           Data.Text             (Text)
-import           Data.Time.Calendar    (isLeapYear)
-import           GHC.Stack             (HasCallStack)
-import           HStream.SQL.Abs       (ColName (..),
-                                        CompOp (CompOpEQ, CompOpNE),
-                                        Create (..), Date (..),
-                                        DerivedCol (DerivedColAs, DerivedColSimpl),
-                                        From (..), GroupBy (..),
-                                        GrpItem (GrpItemCol, GrpItemWin),
-                                        Having (..), Ident (Ident), Insert (..),
-                                        Interval (..), JoinCond (..),
-                                        JoinWindow (..),
-                                        LabelledValueExpr (DLabelledValueExpr),
-                                        SQL (..), SearchCond (..), Sel (..),
-                                        SelList (..), Select (..), SetFunc (..),
-                                        StreamOption (..), TableRef (..),
-                                        Time (..), ValueExpr (..), Where (..),
-                                        Window (..))
-import           HStream.SQL.Exception (Position, SomeSQLException (..),
-                                        buildSQLException)
-import           HStream.SQL.Extra     (anyJoin, extractCondRefNames,
-                                        extractRefNames, extractSelRefNames)
+import           Control.Monad              (unless, void, when)
+import qualified Data.Aeson                 as Aeson
+import qualified Data.ByteString.Lazy       as BSL
+import qualified Data.List                  as L
+import           Data.List.Extra            (anySame)
+import           Data.Text                  (Text)
+import qualified Data.Text                  as Text
+import           Data.Text.Encoding         (encodeUtf8)
+import           Data.Time.Calendar         (isLeapYear)
+import           GHC.Stack                  (HasCallStack)
+import           HStream.SQL.Abs
+import           HStream.SQL.Exception      (SomeSQLException (..),
+                                             buildSQLException)
+import           HStream.SQL.Extra          (anyJoin, extractCondRefNames,
+                                             extractPNInteger, extractRefNames,
+                                             extractSelRefNames)
+import           HStream.SQL.Validate.Utils
 
 ------------------------------ TypeClass Definition ----------------------------
-class (Functor f) => Validate f where
-  validate :: HasCallStack => f Position -> Either SomeSQLException (f Position)
+class Validate t where
+  validate :: HasCallStack => t -> Either SomeSQLException t
   {-# MINIMAL validate #-}
 
 --------------------------------- Basic Types ----------------------------------
+instance Validate PNInteger where
+  validate = return
+
+instance Validate PNDouble where
+  validate = return
+
+instance Validate SString where
+  validate = return
+
+instance Validate Boolean where
+  validate e@(BoolTrue  _) = return e
+  validate e@(BoolFalse _) = return e
+
 -- 1. 0 <= year <= 9999
 -- 2. 1 <= month <= 12
 -- 3. 1 <= day <= real days(30, 31 or other ones)
 instance Validate Date where
-  validate date@(DDate pos y m d) = do
+  validate date@(DDate pos y' m' d') = do
     unless (y >= 0 && y <= 9999)     (Left $ buildSQLException ParseException pos "Year must be between 0 and 9999")
     unless (m >= 1 && m <= 12)       (Left $ buildSQLException ParseException pos "Month must be between 1 and 12")
     unless (d >= 1 && d <= realDays) (Left $ buildSQLException ParseException pos ("Day must be between 1 and " <> show realDays))
     return date
-    where daysOfMonth = [31,28 + if isLeapYear y then 1 else 0,31,30,31,30,31,31,30,31,30,31]
+    where y = extractPNInteger y'
+          m = extractPNInteger m'
+          d = extractPNInteger d'
+          daysOfMonth = [31,28 + if isLeapYear y then 1 else 0,31,30,31,30,31,31,30,31,30,31]
           realDays = daysOfMonth !! (fromInteger m - 1)
 
 -- 1. 0 <= hour   <= 23
 -- 2. 0 <= minute <= 59
 -- 3. 0 <= second <= 59
 instance Validate Time where
-  validate time@(DTime pos h m s) = do
+  validate time@(DTime pos h' m' s') = do
+    let h = extractPNInteger h'
+        m = extractPNInteger m'
+        s = extractPNInteger s'
     unless (h >= 0 && h <= 23) (Left $ buildSQLException ParseException pos "Hour must be between 0 and 23")
     unless (m >= 0 && m <= 59) (Left $ buildSQLException ParseException pos "Minute must be between 0 and 59")
     unless (s >= 0 && s <= 59) (Left $ buildSQLException ParseException pos "Second must be between 0 and 59")
@@ -64,31 +77,49 @@ instance Validate Time where
 
 -- 1. number > 0
 instance Validate Interval where
-  validate i@(DInterval pos n unit) = do
+  validate i@(DInterval pos n' _) = do
+    let n = extractPNInteger n'
     unless (n > 0) (Left $ buildSQLException ParseException pos "Interval must be positive")
     return i
 
 -- 1. only supports "col" and "stream.col"
 -- TODO: "col[n]" and "col.x" are not supported yet
 instance Validate ColName where
-  validate c@(ColNameSimple _ (Ident col)) = Right c
-  validate c@(ColNameStream _ (Ident s) (Ident col)) = Right c
-  validate c@(ColNameInner pos _ _) = Left $ buildSQLException ParseException pos "Nested column name is not supported yet"
-  validate c@(ColNameIndex pos _ _) = Left $ buildSQLException ParseException pos "Nested column name is not supported yet"
+  validate c = case c of
+    (ColNameSimple _ (Ident _)) -> Right c
+    (ColNameStream _ (Ident _) (Ident _)) -> Right c
+    (ColNameInner pos _ _) -> Left $ buildSQLException ParseException pos "Nested column name is not supported yet"
+    (ColNameIndex pos _ _) -> Left $ buildSQLException ParseException pos "Nested column name is not supported yet"
 
 -- 1. Aggregate functions can not be nested
 instance Validate SetFunc where
-  validate f@(SetFuncCountAll _) = Right f
-  validate f@(SetFuncCount pos (ExprSetFunc _ _)) = Left $ buildSQLException ParseException pos "Nested set functions are not supported"
-  validate f@(SetFuncCount _ e) = validate e >> return f
-  validate f@(SetFuncAvg pos (ExprSetFunc _ _))   = Left $ buildSQLException ParseException pos "Nested set functions are not supported"
-  validate f@(SetFuncAvg _ e) = isNumExpr e  >> return f
-  validate f@(SetFuncSum pos (ExprSetFunc _ _))   = Left $ buildSQLException ParseException pos "Nested set functions are not supported"
-  validate f@(SetFuncSum _ e) = isNumExpr e  >> return f
-  validate f@(SetFuncMax pos (ExprSetFunc _ _))   = Left $ buildSQLException ParseException pos "Nested set functions are not supported"
-  validate f@(SetFuncMax _ e) = isOrdExpr e  >> return f
-  validate f@(SetFuncMin pos (ExprSetFunc _ _))   = Left $ buildSQLException ParseException pos "Nested set functions are not supported"
-  validate f@(SetFuncMin _ e) = isOrdExpr e  >> return f
+  validate f = case f of
+    (SetFuncCountAll _) -> Right f
+    (SetFuncCount pos (ExprSetFunc _ _)) -> Left $ buildSQLException ParseException pos "Nested set functions are not supported"
+    (SetFuncCount _ e) -> validate e >> validate e >> return f
+    (SetFuncAvg pos (ExprSetFunc _ _))   -> Left $ buildSQLException ParseException pos "Nested set functions are not supported"
+    (SetFuncAvg _ e) -> isNumExpr e  >> validate e >> return f
+    (SetFuncSum pos (ExprSetFunc _ _))   -> Left $ buildSQLException ParseException pos "Nested set functions are not supported"
+    (SetFuncSum _ e) -> isNumExpr e  >> validate e >> return f
+    (SetFuncMax pos (ExprSetFunc _ _))   -> Left $ buildSQLException ParseException pos "Nested set functions are not supported"
+    (SetFuncMax _ e) -> isOrdExpr e  >> validate e >> return f
+    (SetFuncMin pos (ExprSetFunc _ _))   -> Left $ buildSQLException ParseException pos "Nested set functions are not supported"
+    (SetFuncMin _ e) -> isOrdExpr e  >> validate e >> return f
+
+-- 1. numeral expressions only
+-- 2. scalar functions should not be applied to aggregates
+instance Validate ScalarFunc where
+  validate f
+    | argType == intMask    = isIntExpr    expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == floatMask  = isFloatExpr  expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == numMask    = isNumExpr    expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == ordMask    = isOrdExpr    expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == boolMask   = isBoolExpr   expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == stringMask = isStringExpr expr >> validate expr >> notAggregateExpr expr >> return f
+    | argType == anyMask    = validate expr >> notAggregateExpr expr >> return f
+    | otherwise             = Left $ buildSQLException ParseException (getPos f) "impossible happened"
+    where expr    = getValueExpr f
+          argType = getScalarArgType f
 
 --------------------------------------- ValueExpr ------------------------------
 
@@ -97,13 +128,17 @@ instance Validate SetFunc where
 -- 3. Map and Arr are legal if all elements of them are legal (However Codegen does not support them yet)
 --    And Map requires that all keys are unique
 -- 4. Cols and Aggs should be legal
+-- 5. Scalar functions should not be applied to aggs
 instance Validate ValueExpr where
   validate expr@ExprAdd{}    = isNumExpr expr
   validate expr@ExprSub{}    = isNumExpr expr
   validate expr@ExprMul{}    = isNumExpr expr
+  validate expr@ExprAnd{}    = isBoolExpr expr
+  validate expr@ExprOr{}     = isBoolExpr expr
   validate expr@ExprInt{}    = Right expr
   validate expr@ExprNum{}    = Right expr
   validate expr@ExprString{} = Right expr
+  validate expr@ExprBool{}   = Right expr
   validate expr@(ExprDate _ date) = validate date >> return expr
   validate expr@(ExprTime _ time) = validate time >> return expr
   validate expr@(ExprInterval _ interval) = validate interval >> return expr
@@ -116,63 +151,199 @@ instance Validate ValueExpr where
           extractLabel (DLabelledValueExpr _ label _) = label
   validate expr@(ExprColName _ col) = validate col   >> return expr
   validate expr@(ExprSetFunc _ func) = validate func >> return expr
+  validate expr@(ExprScalarFunc _ func) = validate func >> return expr
 
-isNumExpr :: HasCallStack => ValueExpr Position -> Either SomeSQLException (ValueExpr Position)
-isNumExpr expr@(ExprAdd _ e1 e2)  = isNumExpr e1 >> isNumExpr e2 >> return expr
-isNumExpr expr@(ExprSub _ e1 e2)  = isNumExpr e1 >> isNumExpr e2 >> return expr
-isNumExpr expr@(ExprMul _ e1 e2)  = isNumExpr e1 >> isNumExpr e2 >> return expr
-isNumExpr expr@(ExprInt _ _)      = Right expr
-isNumExpr expr@(ExprNum _ _)      = Right expr
-isNumExpr expr@(ExprString pos _)   = Left $ buildSQLException ParseException pos "Expected a numeric expression but got a String"
-isNumExpr expr@(ExprDate pos _)     = Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Date"
-isNumExpr expr@(ExprTime pos _)     = Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Time"
-isNumExpr expr@(ExprInterval pos _) = Left $ buildSQLException ParseException pos "Expected a numeric expression but got an Interval"
-isNumExpr expr@(ExprArr pos _)      = Left $ buildSQLException ParseException pos "Expected a numeric expression but got an Array"
-isNumExpr expr@(ExprMap pos _)      = Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Map"
-isNumExpr expr@(ExprColName _ _)  = Right expr -- TODO: Use schema to decide this
-isNumExpr expr@(ExprSetFunc _ (SetFuncCountAll _))  = Right expr
-isNumExpr expr@(ExprSetFunc _ (SetFuncCount _ _)) = Right expr
-isNumExpr expr@(ExprSetFunc _ (SetFuncAvg _ e))   = isNumExpr e >> return expr
-isNumExpr expr@(ExprSetFunc _ (SetFuncSum _ e))   = isNumExpr e >> return expr
-isNumExpr expr@(ExprSetFunc _ (SetFuncMax _ e))   = isOrdExpr e >> return expr
-isNumExpr expr@(ExprSetFunc _ (SetFuncMin _ e))   = isOrdExpr e >> return expr
+isNumExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isNumExpr expr = case expr of
+  (ExprAdd _ e1 e2)    -> isNumExpr e1 >> isNumExpr e2 >> return expr
+  (ExprSub _ e1 e2)    -> isNumExpr e1 >> isNumExpr e2 >> return expr
+  (ExprMul _ e1 e2)    -> isNumExpr e1 >> isNumExpr e2 >> return expr
+  (ExprAnd pos _ _)    -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a boolean"
+  (ExprOr pos _ _ )    -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a boolean"
+  (ExprInt _ _)        -> Right expr
+  (ExprNum _ _)        -> Right expr
+  (ExprString pos _)   -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a String"
+  (ExprBool pos _)     -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a boolean"
+  (ExprDate pos _)     -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Date"
+  (ExprTime pos _)     -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Time"
+  (ExprInterval pos _) -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got an Interval"
+  (ExprArr pos _)      -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got an Array"
+  (ExprMap pos _)      -> Left $ buildSQLException ParseException pos "Expected a numeric expression but got a Map"
+  (ExprColName _ _)    -> Right expr -- TODO: Use schema to decide this
+  (ExprSetFunc _ (SetFuncCountAll _)) -> Right expr
+  (ExprSetFunc _ (SetFuncCount _ _))  -> Right expr
+  (ExprSetFunc _ (SetFuncAvg _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncSum _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncMax _ e))    -> isNumExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMin _ e))    -> isNumExpr e >> return expr
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeNum funcType then return expr
+                              else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
 
-isOrdExpr :: HasCallStack => ValueExpr Position -> Either SomeSQLException (ValueExpr Position)
-isOrdExpr expr@ExprAdd{}    = isNumExpr expr
-isOrdExpr expr@ExprSub{}    = isNumExpr expr
-isOrdExpr expr@ExprMul{}    = isNumExpr expr
-isOrdExpr expr@ExprInt{}    = Right expr
-isOrdExpr expr@ExprNum{}    = Right expr
-isOrdExpr expr@ExprString{} = Right expr
-isOrdExpr expr@(ExprDate _ date) = validate date >> return expr
-isOrdExpr expr@(ExprTime _ time) = validate time >> return expr
-isOrdExpr expr@(ExprInterval _ interval) = validate interval >> return expr
-isOrdExpr expr@(ExprArr pos _) = Left $ buildSQLException ParseException pos "Expected a comparable expression but got an Array"
-isOrdExpr expr@(ExprMap pos _) = Left $ buildSQLException ParseException pos "Expected a comparable expression but got a Map"
-isOrdExpr expr@(ExprColName _ _) = Right expr-- inaccurate
-isOrdExpr expr@(ExprSetFunc _ (SetFuncCountAll _))  = Right expr
-isOrdExpr expr@(ExprSetFunc _ (SetFuncCount _ _)) = Right expr
-isOrdExpr expr@(ExprSetFunc _ (SetFuncAvg _ e))   = isNumExpr e >> return expr
-isOrdExpr expr@(ExprSetFunc _ (SetFuncSum _ e))   = isNumExpr e >> return expr
-isOrdExpr expr@(ExprSetFunc _ (SetFuncMax _ e))   = isOrdExpr e >> return expr
-isOrdExpr expr@(ExprSetFunc _ (SetFuncMin _ e))   = isOrdExpr e >> return expr
+isFloatExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isFloatExpr expr = case expr of
+  (ExprAdd _ e1 e2)    -> isFloatExpr e1 >> isFloatExpr e2 >> return expr
+  (ExprSub _ e1 e2)    -> isFloatExpr e1 >> isFloatExpr e2 >> return expr
+  (ExprMul _ e1 e2)    -> isFloatExpr e1 >> isFloatExpr e2 >> return expr
+  (ExprAnd pos _ _)    -> Left $ buildSQLException ParseException pos "Expected a float expression but got a boolean"
+  (ExprOr pos _ _ )    -> Left $ buildSQLException ParseException pos "Expected a float expression but got a boolean"
+  (ExprInt pos _)        -> Left $ buildSQLException ParseException pos "Expected a float expression but got an Integral"
+  (ExprNum _ _)        -> Right expr
+  (ExprString pos _)   -> Left $ buildSQLException ParseException pos "Expected a float expression but got a String"
+  (ExprBool pos _)     -> Left $ buildSQLException ParseException pos "Expected a float expression but got a boolean"
+  (ExprDate pos _)     -> Left $ buildSQLException ParseException pos "Expected a float expression but got a Date"
+  (ExprTime pos _)     -> Left $ buildSQLException ParseException pos "Expected a float expression but got a Time"
+  (ExprInterval pos _) -> Left $ buildSQLException ParseException pos "Expected a float expression but got an Interval"
+  (ExprArr pos _)      -> Left $ buildSQLException ParseException pos "Expected a float expression but got an Array"
+  (ExprMap pos _)      -> Left $ buildSQLException ParseException pos "Expected a float expression but got a Map"
+  (ExprColName _ _)    -> Right expr -- TODO: Use schema to decide this
+  (ExprSetFunc pos (SetFuncCountAll _)) -> Left $ buildSQLException ParseException pos "Expected a float expression but got an Integral"
+  (ExprSetFunc pos (SetFuncCount _ _))  -> Left $ buildSQLException ParseException pos "Expected a float expression but got an Integral"
+  (ExprSetFunc _ (SetFuncAvg _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncSum _ e))    -> isFloatExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMax _ e))    -> isFloatExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMin _ e))    -> isFloatExpr e >> return expr
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeFloat funcType then return expr
+                                else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
+
+isOrdExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isOrdExpr expr = case expr of
+  ExprAdd{}    -> isNumExpr expr
+  ExprSub{}    -> isNumExpr expr
+  ExprMul{}    -> isNumExpr expr
+  (ExprAnd pos _ _) -> Left $ buildSQLException ParseException pos "Expected a comparable expression but got a boolean"
+  (ExprOr  pos _ _) -> Left $ buildSQLException ParseException pos "Expected a comparable expression but got a boolean"
+  ExprInt{}    -> Right expr
+  ExprNum{}    -> Right expr
+  ExprString{} -> Right expr
+  (ExprBool pos _) -> Left $ buildSQLException ParseException pos "Expected a comparable expression but got a boolean"
+  (ExprDate _ date) -> validate date >> return expr
+  (ExprTime _ time) -> validate time >> return expr
+  (ExprInterval _ interval) -> validate interval >> return expr
+  (ExprArr pos _) -> Left $ buildSQLException ParseException pos "Expected a comparable expression but got an Array"
+  (ExprMap pos _) -> Left $ buildSQLException ParseException pos "Expected a comparable expression but got a Map"
+  (ExprColName _ _) -> Right expr-- inaccurate
+  (ExprSetFunc _ (SetFuncCountAll _)) -> Right expr
+  (ExprSetFunc _ (SetFuncCount _ _))  -> Right expr
+  (ExprSetFunc _ (SetFuncAvg _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncSum _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncMax _ _))    -> return expr
+  (ExprSetFunc _ (SetFuncMin _ _))    -> return expr
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeOrd funcType then return expr
+                              else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
+
+isBoolExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isBoolExpr expr = case expr of
+  (ExprAdd pos _ _)  -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSub pos _ _)  -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprMul pos _ _)  -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprAnd _ e1 e2)    -> isBoolExpr e1 >> isBoolExpr e2 >> return expr
+  (ExprOr  _ e1 e2)    -> isBoolExpr e1 >> isBoolExpr e2 >> return expr
+  (ExprInt pos _)      -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprNum pos _)      -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprString pos _)   -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprBool _ _)       -> Right expr
+  (ExprDate pos _)     -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprTime pos _)     -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprInterval pos _) -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprArr pos _)      -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprMap pos _)      -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprColName _ _)    -> Right expr -- TODO: Use schema to decide this
+  (ExprSetFunc pos (SetFuncCountAll _)) -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSetFunc pos (SetFuncCount _ _))  -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSetFunc pos (SetFuncAvg _ _))    -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSetFunc pos (SetFuncSum _ _))    -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSetFunc pos (SetFuncMax _ _))    -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprSetFunc pos (SetFuncMin _ _))    -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprScalarFunc pos (ScalarFuncSin _ _)) -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprScalarFunc pos (ScalarFuncAbs _ _)) -> Left $ buildSQLException ParseException pos "Expected a boolean expression but got a numeric"
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeBool funcType then return expr
+                               else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
+
+isIntExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isIntExpr expr = case expr of
+  (ExprAdd _ e1 e2)    -> isIntExpr e1 >> isIntExpr e2 >> return expr
+  (ExprSub _ e1 e2)    -> isIntExpr e1 >> isIntExpr e2 >> return expr
+  (ExprMul _ e1 e2)    -> isIntExpr e1 >> isIntExpr e2 >> return expr
+  (ExprAnd pos _ _)    -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a boolean"
+  (ExprOr pos _ _ )    -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a boolean"
+  (ExprInt _ _)        -> Right expr
+  (ExprNum pos _)        -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a numeric"
+  (ExprString pos _)   -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a String"
+  (ExprBool pos _)     -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a boolean"
+  (ExprDate pos _)     -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a Date"
+  (ExprTime pos _)     -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a Time"
+  (ExprInterval pos _) -> Left $ buildSQLException ParseException pos "Expected an integral expression but got an Interval"
+  (ExprArr pos _)      -> Left $ buildSQLException ParseException pos "Expected an integral expression but got an Array"
+  (ExprMap pos _)      -> Left $ buildSQLException ParseException pos "Expected an integral expression but got a Map"
+  (ExprColName _ _)    -> Right expr -- TODO: Use schema to decide this
+  (ExprSetFunc _ (SetFuncCountAll _))    -> Right expr
+  (ExprSetFunc _ (SetFuncCount _ _))     -> Right expr
+  (ExprSetFunc _ (SetFuncAvg _ e))       -> isIntExpr e >> return expr -- not precise
+  (ExprSetFunc _ (SetFuncSum _ e))       -> isIntExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMax _ e))       -> isIntExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMin _ e))       -> isIntExpr e >> return expr
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeInt funcType then return expr
+                              else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
+
+isStringExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+isStringExpr expr = case expr of
+  (ExprAdd pos _ _)    -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprSub pos _ _)    -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprMul pos _ _)    -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprAnd pos _ _)    -> Left $ buildSQLException ParseException pos "Expected an String expression but got a boolean"
+  (ExprOr pos _ _ )    -> Left $ buildSQLException ParseException pos "Expected an String expression but got a boolean"
+  (ExprInt pos _)      -> Left $ buildSQLException ParseException pos "Expected an String expression but got an Integer"
+  (ExprNum pos _)      -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprString _ _)     -> return expr
+  (ExprBool pos _)     -> Left $ buildSQLException ParseException pos "Expected an String expression but got a boolean"
+  (ExprDate pos _)     -> Left $ buildSQLException ParseException pos "Expected an String expression but got a Date"
+  (ExprTime pos _)     -> Left $ buildSQLException ParseException pos "Expected an String expression but got a Time"
+  (ExprInterval pos _) -> Left $ buildSQLException ParseException pos "Expected an String expression but got an Interval"
+  (ExprArr pos _)      -> Left $ buildSQLException ParseException pos "Expected an String expression but got an Array"
+  (ExprMap pos _)      -> Left $ buildSQLException ParseException pos "Expected an String expression but got a Map"
+  (ExprColName _ _)    -> Right expr -- TODO: Use schema to decide this
+  (ExprSetFunc pos (SetFuncCountAll _))    -> Left $ buildSQLException ParseException pos "Expected an String expression but got an Integer"
+  (ExprSetFunc pos (SetFuncCount _ _))     -> Left $ buildSQLException ParseException pos "Expected an String expression but got an Integer"
+  (ExprSetFunc pos (SetFuncAvg _ _))       -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprSetFunc pos (SetFuncSum _ _))       -> Left $ buildSQLException ParseException pos "Expected an String expression but got a numeric"
+  (ExprSetFunc _ (SetFuncMax _ e))       -> isStringExpr e >> return expr
+  (ExprSetFunc _ (SetFuncMin _ e))       -> isStringExpr e >> return expr
+  (ExprScalarFunc _ f) ->
+    let funcType = getScalarFuncType f
+     in if isTypeString funcType then return expr
+                                 else Left $ buildSQLException ParseException (getPos f) "Argument type mismatched"
 
 -- For validating SearchCond
-isAggregateExpr :: HasCallStack => ValueExpr Position -> Either SomeSQLException (ValueExpr Position)
-isAggregateExpr (ExprSetFunc pos _) = Left $ buildSQLException ParseException pos "Aggregate functions are not allowed in WHERE clause, HAVING clause and JOIN condition"
-isAggregateExpr expr@(ExprAdd _ e1 e2) = isAggregateExpr e1 >> isAggregateExpr e2 >> return expr
-isAggregateExpr expr@(ExprSub _ e1 e2) = isAggregateExpr e1 >> isAggregateExpr e2 >> return expr
-isAggregateExpr expr@(ExprMul _ e1 e2) = isAggregateExpr e1 >> isAggregateExpr e2 >> return expr
-isAggregateExpr expr@(ExprArr _ es)    = mapM_ isAggregateExpr es >> return expr
-isAggregateExpr expr@(ExprMap _ es)    = mapM_ (isAggregateExpr . extractExpr) es >> return expr
+notAggregateExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
+notAggregateExpr (ExprSetFunc pos _) = Left $ buildSQLException ParseException pos "Aggregate functions are not allowed in WHERE clause, HAVING clause and JOIN condition"
+notAggregateExpr (ExprScalarFunc _ (ScalarFuncSin _ e)) = notAggregateExpr e
+notAggregateExpr (ExprScalarFunc _ (ScalarFuncAbs _ e)) = notAggregateExpr e
+notAggregateExpr expr@(ExprAdd _ e1 e2) = notAggregateExpr e1 >> notAggregateExpr e2 >> return expr
+notAggregateExpr expr@(ExprSub _ e1 e2) = notAggregateExpr e1 >> notAggregateExpr e2 >> return expr
+notAggregateExpr expr@(ExprMul _ e1 e2) = notAggregateExpr e1 >> notAggregateExpr e2 >> return expr
+notAggregateExpr expr@(ExprAnd _ e1 e2) = notAggregateExpr e1 >> notAggregateExpr e2 >> return expr
+notAggregateExpr expr@(ExprOr  _ e1 e2) = notAggregateExpr e1 >> notAggregateExpr e2 >> return expr
+notAggregateExpr expr@(ExprArr _ es)    = mapM_ notAggregateExpr es >> return expr
+notAggregateExpr expr@(ExprMap _ es)    = mapM_ (notAggregateExpr . extractExpr) es >> return expr
   where extractExpr (DLabelledValueExpr _ _ e) = e
-isAggregateExpr expr = return expr
+notAggregateExpr expr = return expr
 
 -- For validating Insert
-isConstExpr :: HasCallStack => ValueExpr Position -> Either SomeSQLException (ValueExpr Position)
+isConstExpr :: HasCallStack => ValueExpr -> Either SomeSQLException ValueExpr
 isConstExpr expr@ExprInt{}      = Right expr
 isConstExpr expr@ExprNum{}      = Right expr
 isConstExpr expr@ExprString{}   = Right expr
+isConstExpr expr@ExprBool{}     = Right expr
 isConstExpr expr@ExprDate{}     = Right expr
 isConstExpr expr@ExprTime{}     = Right expr
 isConstExpr expr@ExprInterval{} = Right expr
@@ -219,14 +390,14 @@ instance Validate SelList where
 instance Validate From where
   validate (DFrom pos []) = Left $ buildSQLException ParseException pos "FROM clause should specify at least one stream"
   validate from@(DFrom pos refs@[ref]) = do
-    validate ref
+    void $ validate ref
     when (anyJoin refs && anySimpleRef)
       (Left $ buildSQLException ParseException pos "Stream name of column in JOIN ON clause has to be explicitly specified when joining exists")
     unless (all (`L.elem` refNames) condRefNames)
       (Left $ buildSQLException ParseException pos "One or more stream name in joining condition is not specified in FROM clause")
     return from
     where refNames = extractRefNames refs -- Stream names and aliases
-          ext :: TableRef a -> (Bool, [Text])
+          ext :: TableRef -> (Bool, [Text])
           ext (TableRefJoin _ _ _ _ _ (DJoinCond _ cond)) = extractCondRefNames cond
           ext _ = (False, [])
           -- Stream names in joining conditions
@@ -240,14 +411,14 @@ instance Validate From where
 instance Validate TableRef where
   validate r@(TableRefSimple _ _) = Right r
   validate r@(TableRefAs _ ref _) = validate ref >> return r
-  validate r@(TableRefJoin pos TableRefJoin{} _ _ _ _) = Left $ buildSQLException ParseException pos "Joining more than 2 streams is not supported"
-  validate r@(TableRefJoin pos _ _ TableRefJoin{} _ _) = Left $ buildSQLException ParseException pos "Joining more than 2 streams is not supported"
-  validate r@(TableRefJoin pos ref1 joinType ref2 win joinCond) = do
+  validate   (TableRefJoin pos TableRefJoin{} _ _ _ _) = Left $ buildSQLException ParseException pos "Joining more than 2 streams is not supported"
+  validate   (TableRefJoin pos _ _ TableRefJoin{} _ _) = Left $ buildSQLException ParseException pos "Joining more than 2 streams is not supported"
+  validate r@(TableRefJoin pos ref1 _ ref2 win joinCond) = do
     stream1 <- streamName ref1
     stream2 <- streamName ref2
     when (stream1 == stream2)
       (Left $ buildSQLException ParseException pos "Streams to be joined can not have the same name")
-    validate ref1 >> validate ref2 >> validate win >> validate joinCond
+    void $ validate ref1 >> validate ref2 >> validate win >> validate joinCond
     case joinCondStreamNames joinCond of
       Left err     -> Left err
       Right sNames -> do
@@ -261,13 +432,13 @@ instance Validate TableRef where
       streamName _ = Left $ buildSQLException ParseException Nothing "Impossible happened"
       -- Note: Due to `Validate JoinCond`, only forms like "s1.x == s2.y" are legal
       joinCondStreamNames (DJoinCond _
-                           cond@(CondOp _
-                                 (ExprColName _ (ColNameStream _ (Ident s1) (Ident f1)))
-                                 op
-                                 (ExprColName _ (ColNameStream _ (Ident s2) (Ident f2)))
-                                )
+                           (CondOp _
+                             (ExprColName _ (ColNameStream _ (Ident s1) (Ident _)))
+                             _
+                             (ExprColName _ (ColNameStream _ (Ident s2) (Ident _)))
+                           )
                           ) = return (s1, s2)
-      joinCondStreamNames (DJoinCond pos _) = Left $ buildSQLException ParseException pos "Impossible happened"
+      joinCondStreamNames (DJoinCond _ _) = Left $ buildSQLException ParseException pos "Impossible happened"
 
 -- 1. Interval in the window should be legal
 instance Validate JoinWindow where
@@ -279,9 +450,9 @@ instance Validate JoinWindow where
 instance Validate JoinCond where
   validate joinCond@(DJoinCond pos
                      cond@(CondOp _
-                           (ExprColName _ (ColNameStream _ (Ident s1) (Ident f1)))
+                           (ExprColName _ (ColNameStream _ (Ident s1) (Ident _)))
                            op
-                           (ExprColName _ (ColNameStream _ (Ident s2) (Ident f2)))
+                           (ExprColName _ (ColNameStream _ (Ident s2) (Ident _)))
                           )
                     ) = do
     when (s1 == s2)
@@ -289,11 +460,11 @@ instance Validate JoinCond where
     case op of
       CompOpEQ _ -> validate cond >> return joinCond
       _          -> Left $ buildSQLException ParseException pos "JOIN ON clause does not support operator other than ="
-  validate joinCond@(DJoinCond pos CondOp{})      = Left $ buildSQLException ParseException pos "JOIN ON clause only supports forms such as 's1.x = s2.y'"
-  validate joinCond@(DJoinCond pos CondBetween{}) = Left $ buildSQLException ParseException pos "JOIN ON clause does not support BETWEEN condition"
-  validate joinCond@(DJoinCond pos CondOr{})      = Left $ buildSQLException ParseException pos "JOIN ON clause does not support OR condition"
-  validate joinCond@(DJoinCond pos CondAnd{})     = Left $ buildSQLException ParseException pos "JOIN ON clause does not support OR condition"
-  validate joinCond@(DJoinCond pos CondNot{})     = Left $ buildSQLException ParseException pos "JOIN ON clause does not support NOT condition"
+  validate (DJoinCond pos CondOp{})      = Left $ buildSQLException ParseException pos "JOIN ON clause only supports forms such as 's1.x = s2.y'"
+  validate (DJoinCond pos CondBetween{}) = Left $ buildSQLException ParseException pos "JOIN ON clause does not support BETWEEN condition"
+  validate (DJoinCond pos CondOr{})      = Left $ buildSQLException ParseException pos "JOIN ON clause does not support OR condition"
+  validate (DJoinCond pos CondAnd{})     = Left $ buildSQLException ParseException pos "JOIN ON clause does not support OR condition"
+  validate (DJoinCond pos CondNot{})     = Left $ buildSQLException ParseException pos "JOIN ON clause does not support NOT condition"
 
 -- 1. Exprs should be legal
 -- 2. No aggregate Expr
@@ -303,14 +474,14 @@ instance Validate SearchCond where
   validate cond@(CondAnd _ c1 c2)   = validate c1 >> validate c2 >> return cond
   validate cond@(CondNot _ c)       = validate c  >> return cond
   validate cond@(CondOp _ e1 op e2) = do
-    isAggregateExpr e1 >> isAggregateExpr e2
+    void $ notAggregateExpr e1 >> notAggregateExpr e2
     case op of
       CompOpEQ _ -> validate e1  >> validate e2  >> return cond
       CompOpNE _ -> validate e1  >> validate e2  >> return cond
       _          -> isOrdExpr e1 >> isOrdExpr e2 >> return cond
   validate cond@(CondBetween _ e1 e e2) = do
-    isAggregateExpr e1 >> isAggregateExpr e2 >> isAggregateExpr e
-    isOrdExpr e1 >> isOrdExpr e2 >> isOrdExpr e
+    void $ notAggregateExpr e1 >> notAggregateExpr e2 >> notAggregateExpr e
+    void $ isOrdExpr e1 >> isOrdExpr e2 >> isOrdExpr e
     return cond
 
 -- Where
@@ -325,11 +496,12 @@ instance Validate Where where
 --    - a column and a window
 -- 2. Column and/or window should be legal
 instance Validate GroupBy where
-  validate grp@(DGroupByEmpty _) = Right grp
-  validate grp@(DGroupBy pos []) = Left $ buildSQLException ParseException pos "Impossible happened"
-  validate grp@(DGroupBy pos [GrpItemCol _ col]) = validate col >> return grp
-  validate grp@(DGroupBy pos [GrpItemCol _ col, GrpItemWin _ win]) = validate col >> validate win >> return grp
-  validate grp@(DGroupBy pos _) = Left $ buildSQLException ParseException pos "An GROUP BY clause can only contain one column name with/without an window"
+  validate grp = case grp of
+    (DGroupByEmpty _) -> Right grp
+    (DGroupBy pos []) -> Left $ buildSQLException ParseException pos "Impossible happened"
+    (DGroupBy _   [GrpItemCol _ col]) -> validate col >> return grp
+    (DGroupBy _   [GrpItemCol _ col, GrpItemWin _ win]) -> validate col >> validate win >> return grp
+    (DGroupBy pos _) -> Left $ buildSQLException ParseException pos "An GROUP BY clause can only contain one column name with/without an window"
 
 -- 1. Intervals should be legal
 -- 2. For HoppingWindow, length >= hop
@@ -340,7 +512,7 @@ instance Validate Window where
     void $ validate i2
     unless (i1 >= i2) (Left $ buildSQLException ParseException pos "Hopping interval can not be larger than the size of the window")
     return win
-  validate win@(SessionWindow pos interval) = validate interval >> return win
+  validate win@(SessionWindow _ interval) = validate interval >> return win
 
 -- Having
 -- 1. SearchCond in it should be legal
@@ -388,25 +560,29 @@ instance Validate Select where
 
 ------------------------------------- CREATE -----------------------------------
 instance Validate Create where
-  validate create@(CreateAs _ _ select options) =
-    validate select >> validate (StreamOptions options) >> return create
-  validate create@(DCreate _ _ options) =
+  validate create@(DCreate _ _) = return create
+  validate create@(CreateOp _ _ options) =
     validate (StreamOptions options) >> return create
+  validate create@(CreateAs _ _ select) =
+    validate select >> return create
+  validate create@(CreateAsOp _ _ select options) =
+    validate select >> validate (StreamOptions options) >> return create
 
 instance Validate StreamOption where
-  validate op@(OptionFormat pos s) = do
-    unless (s `L.elem` ["\"JSON\"", "\"json\""]) (Left $ buildSQLException ParseException pos "Stream format can only support JSON yet")
+  validate op@(OptionRepFactor pos n') = do
+    let n = extractPNInteger n'
+    unless (n > 0) (Left $ buildSQLException ParseException pos "Replicate factor can only be positive integers")
     return op
 
-newtype StreamOptions a = StreamOptions [StreamOption a] deriving (Functor)
+newtype StreamOptions = StreamOptions [StreamOption]
 
 instance Validate StreamOptions where
   validate (StreamOptions options) = do
     mapM_ validate options
     case options of
-      [OptionFormat{}] -> return $ StreamOptions options
-      _                ->
-        Left $ buildSQLException ParseException Nothing "There should be one and only one FORMAT option"
+      [OptionRepFactor{}] -> return $ StreamOptions options
+      _                                   ->
+        Left $ buildSQLException ParseException Nothing "There should be one and only one REPLICATE option"
 
 ------------------------------------- INSERT -----------------------------------
 instance Validate Insert where
@@ -415,9 +591,26 @@ instance Validate Insert where
     mapM_ validate exprs
     mapM_ isConstExpr exprs
     return insert
+  validate insert@(InsertBinary _ _ _) = return insert
+  validate insert@(InsertJson pos _ (SString text)) = do
+    let serialized = BSL.fromStrict . encodeUtf8 . Text.init . Text.tail $ text
+    let (o' :: Maybe Aeson.Object) = Aeson.decode serialized
+    case o' of
+      Nothing -> Left $ buildSQLException ParseException pos "Invalid JSON text"
+      Just _  -> return insert
+
+------------------------------------- SHOW -------------------------------------
+instance Validate ShowQ where
+  validate = return
+
+------------------------------------- DROP -------------------------------------
+instance Validate Drop where
+  validate = return
 
 ------------------------------------- SQL --------------------------------------
 instance Validate SQL where
   validate sql@(QSelect _ select) = validate select >> return sql
   validate sql@(QCreate _ create) = validate create >> return sql
   validate sql@(QInsert _ insert) = validate insert >> return sql
+  validate sql@(QShow   _ show)   = validate show   >> return sql
+  validate sql@(QDrop   _ drop)   = validate drop   >> return sql

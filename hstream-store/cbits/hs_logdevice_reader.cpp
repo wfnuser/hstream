@@ -1,11 +1,5 @@
 #include "hs_logdevice.h"
 
-char* copyString(const std::string& str) {
-  char* result = reinterpret_cast<char*>(malloc(sizeof(char) * str.size()));
-  memcpy(result, str.data(), sizeof(char) * str.size());
-  return result;
-}
-
 extern "C" {
 // ----------------------------------------------------------------------------
 // Reader
@@ -136,6 +130,15 @@ READ(logdevice_checkpointed_reader_read, logdevice_sync_checkpointed_reader_t)
 // ----------------------------------------------------------------------------
 // Checkpointed Reader
 
+facebook::logdevice::Status ld_checkpointed_reader_start_reading_from_ckp(
+    logdevice_sync_checkpointed_reader_t* reader, c_logid_t logid,
+    c_lsn_t until) {
+  int ret = reader->rep->startReadingFromCheckpoint(logid_t(logid), until);
+  if (ret == 0)
+    return facebook::logdevice::E::OK;
+  return facebook::logdevice::err;
+}
+
 facebook::logdevice::Status
 sync_write_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
                        c_logid_t* logids, c_lsn_t* lsns, size_t len) {
@@ -145,11 +148,43 @@ sync_write_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
   return reader->rep->syncWriteCheckpoints(checkpoints);
 }
 
+void write_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
+                       c_logid_t* logids, c_lsn_t* lsns, size_t len,
+                       HsStablePtr mvar, HsInt cap,
+                       facebook::logdevice::Status* st_out) {
+  std::map<logid_t, lsn_t> checkpoints;
+  for (int i = 0; i < len; ++i)
+    checkpoints[logid_t(logids[i])] = lsns[i];
+  auto cb = [st_out, mvar, cap](facebook::logdevice::Status st) {
+    if (st_out) {
+      *st_out = st;
+    }
+    hs_try_putmvar(cap, mvar);
+    hs_thread_done();
+  };
+  reader->rep->asyncWriteCheckpoints(checkpoints, cb);
+}
+
 facebook::logdevice::Status
 sync_write_last_read_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
                                  const c_logid_t* logids, size_t len) {
   return reader->rep->syncWriteCheckpoints(
       std::vector<logid_t>(logids, logids + len));
+}
+
+void write_last_read_checkpoints(logdevice_sync_checkpointed_reader_t* reader,
+                                 const c_logid_t* logids, size_t len,
+                                 HsStablePtr mvar, HsInt cap,
+                                 facebook::logdevice::Status* st_out) {
+  auto cb = [st_out, mvar, cap](facebook::logdevice::Status st) {
+    if (st_out) {
+      *st_out = st;
+    }
+    hs_try_putmvar(cap, mvar);
+    hs_thread_done();
+  };
+  reader->rep->asyncWriteCheckpoints(
+      cb, std::vector<logid_t>(logids, logids + len));
 }
 
 // ----------------------------------------------------------------------------

@@ -2,12 +2,21 @@
 
 import argparse
 import os
+import sys
 from pathlib import Path
 import subprocess
 import re
 
 
 HOME = os.getenv("HOME")
+CABAL_HOME = os.getenv("CABAL_HOME", f"{HOME}/.cabal")
+STACK_HOME = os.getenv("STACK_HOME", f"{HOME}/.stack")
+HOOGLE_HOME = os.getenv("HOOGLE_HOME", f'{HOME}/.hoogle')
+
+DEFAULT_HS_IMAGE = 'docker.io/hstreamdb/haskell'
+DEFAULT_LD_IMAGE = 'docker.io/hstreamdb/logdevice'
+DEFAULT_DB_IMAGE = 'docker.io/hstreamdb/hstream'
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(os.path.abspath(__file__))))
 CUID, CGID = os.getuid(), os.getgid()
 LOGDEVICE_CONTAINER_NAME = f"logdevice-dev-cluster-{CUID}"
@@ -24,6 +33,14 @@ def run_sh(sh, stderr=subprocess.STDOUT, stdout=None, check=True):
     assert isinstance(sh, str)
     args = ["bash", "-c", sh]
     return subprocess.run(args, stderr=stderr, stdout=stdout, check=check)
+
+
+def update_images(images=None):
+    images = images or [DEFAULT_DB_IMAGE, DEFAULT_HS_IMAGE, DEFAULT_LD_IMAGE]
+    for i in images:
+        cmd = f"docker pull {i}"
+        loginfo(f"Run {cmd}...")
+        run_sh(cmd)
 
 
 def is_cluster_started(container_bin):
@@ -56,7 +73,7 @@ def cluster_stop(container_bin):
     run_sh(f"{container_bin} kill {LOGDEVICE_CONTAINER_NAME}", check=False)
 
 
-def run_ldshell(image, data_dir, container_bin):
+def run_ldshell(image, container_bin, data_dir):
     if not is_cluster_started(container_bin):
         return logerr("Please start the dev-cluster first. Run: dev-tools cluster-start")
 
@@ -75,23 +92,20 @@ def run_ldshell(image, data_dir, container_bin):
 
 
 def haskell_env(container_bin, image, command, cmd_args, data_dir,
-                tty, interactive, rm, extra_container_options):
+                tty, interactive, rm, check,
+                network="host", extra_container_options=""):
 
     if not is_cluster_started(container_bin):
-        return logerr("Please start the dev-cluster first. Run: dev-tools cluster-start")
-
-    stack_home = f"{HOME}/.stack"
-    cabal_home = f"{HOME}/.cabal"
-    hoogle_home = f'{HOME}/.hoogle'
+        sys.exit("Please start the dev-cluster first. Run: dev-tools cluster-start")
 
     Path(f"{HOME}/.local/bin").mkdir(parents=True, exist_ok=True)
     Path(f"{HOME}/.ghc").mkdir(parents=True, exist_ok=True)
-    Path(f"{cabal_home}").mkdir(parents=True, exist_ok=True)
-    Path(f"{stack_home}").mkdir(parents=True, exist_ok=True)
-    Path(f"{hoogle_home}").mkdir(parents=True, exist_ok=True)
+    Path(f"{CABAL_HOME}").mkdir(parents=True, exist_ok=True)
+    Path(f"{STACK_HOME}").mkdir(parents=True, exist_ok=True)
+    Path(f"{HOOGLE_HOME}").mkdir(parents=True, exist_ok=True)
 
     user_cmd = f"{command} {' '.join(cmd_args)}"
-    user_path = f"/opt/ghc/bin:/opt/cabal/bin:{HOME}/.local/bin:{HOME}/.cabal/bin:$PATH"
+    user_path = f"/opt/ghc/bin:/opt/cabal/bin:/usr/local/bin:{CABAL_HOME}/bin:{HOME}/.local/bin:$PATH"
     container_opts = " ".join([
         "-t" if tty else "",
         "-i" if interactive else "",
@@ -104,76 +118,105 @@ def haskell_env(container_bin, image, command, cmd_args, data_dir,
                 -e PATH={user_path} \
                 -v {HOME}/.local/bin:{HOME}/.local/bin:rw \
                 -v {HOME}/.ghc:{HOME}/.ghc:rw \
-                -v {stack_home}:{HOME}/.stack:rw \
-                -v {cabal_home}:{HOME}/.cabal:rw \
-                -v {hoogle_home}:{HOME}/.hoogle:rw \
+                -v {STACK_HOME}:{HOME}/.stack:rw \
+                -v {CABAL_HOME}:{HOME}/.cabal:rw \
+                -v {HOOGLE_HOME}:{HOME}/.hoogle:rw \
                 -v "{PROJECT_ROOT}:{PROJECT_ROOT}" \
                 -v "{data_dir}:/data/store" \
                 -v "/tmp:/tmp" \
                 -w "{PROJECT_ROOT}" \
-                --network host \
+                --network {network} \
                 {extra_container_options} \
                 {image} {user_cmd}'''
     loginfo(f"Run <{user_cmd}> from <{image}> image...")
-    run_sh(cmd, check=False)
+    run_sh(cmd, check=check)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='HStream dev tools.')
     subparsers = parser.add_subparsers(title='subcommands', dest='sub_command')
 
+    # update-image
+    parser_update_images = subparsers.add_parser(
+        'update-images', help='Update required docker images')
+
+    # cluster-start
     parser_cluster_start = subparsers.add_parser(
         'cluster-start', help='Start logdevice dev cluster')
     parser_cluster_start.add_argument(
         '--image', '-i', help='logdevice docker images',
-        default='docker.io/hstreamdb/logdevice')
+        default=DEFAULT_LD_IMAGE)
     parser_cluster_start.add_argument(
         '--data-dir', '-d', type=Path, default=DEFAULT_LOGDEVICE_DIR)
     parser_cluster_start.add_argument('--container-bin', default='docker')
 
+    # cluster-stop
     parser_cluster_stop = subparsers.add_parser(
         'cluster-stop', help='Stop logdevice dev cluster')
     parser_cluster_stop.add_argument('--container-bin', default='docker')
 
+    # ldshell
     parser_cluster_ldshell = subparsers.add_parser(
         'ldshell', help='')
     parser_cluster_ldshell.add_argument(
         '--image', '-i', help='logdevice docker images',
-        default='docker.io/hstreamdb/logdevice')
+        default=DEFAULT_LD_IMAGE)
     parser_cluster_ldshell.add_argument('--container-bin', default='docker')
     parser_cluster_ldshell.add_argument(
         '--data-dir', '-d', type=Path, default=DEFAULT_LOGDEVICE_DIR)
 
+    # shell
     parser_haskell = subparsers.add_parser(
         'shell', help='Enter in a shell with all haskell dev dependencies')
     parser_haskell.add_argument(
-        '--image', '-i', help='logdevice docker images', default='docker.io/hstreamdb/haskell')
+        '--image', '-i', help='logdevice docker images', default=DEFAULT_HS_IMAGE)
     parser_haskell.add_argument('--container-bin', default='docker')
+    parser_haskell.add_argument('--no-interactive', action='store_true')
+    parser_haskell.add_argument('--no-tty', action='store_true')
+    parser_haskell.add_argument('--check', action='store_true')
     parser_haskell.add_argument(
         '--data-dir', '-d', type=Path, default=DEFAULT_LOGDEVICE_DIR)
+    parser_haskell.add_argument('--network', default='host')
     parser_haskell.add_argument('--extra-container-options', default='')
+    parser_haskell.add_argument('cmd_args', nargs='*')
 
+    # cabal
     parser_haskell_cabal = subparsers.add_parser('cabal', help='Run cabal command directly')
     parser_haskell_cabal.add_argument(
-        '--image', '-i', help='logdevice docker images', default='docker.io/hstreamdb/haskell')
+        '--image', '-i', help='logdevice docker images', default=DEFAULT_HS_IMAGE)
+    # TODO: since python3.9 there is BooleanOptionalAction available in argparse
+    parser_haskell_cabal.add_argument('--no-interactive', action='store_true')
+    parser_haskell_cabal.add_argument('--no-tty', action='store_true')
+    parser_haskell_cabal.add_argument('--check', action='store_true')
     parser_haskell_cabal.add_argument('--container-bin', default='docker')
     parser_haskell_cabal.add_argument(
         '--data-dir', '-d', type=Path, default=DEFAULT_LOGDEVICE_DIR)
+    parser_haskell_cabal.add_argument('--network', default='host')
     parser_haskell_cabal.add_argument('--extra-container-options', default='')
     parser_haskell_cabal.add_argument('cmd_args', nargs='*')
 
     args = vars(parser.parse_args())
     sub_command = args.pop('sub_command')
 
+    if sub_command == 'update-images':
+        update_images()
     if sub_command == 'cluster-start':
         cluster_start(**args)
-    elif sub_command == 'ldshell':
-        run_ldshell(**args)
     elif sub_command == 'cluster-stop':
         cluster_stop(**args)
+    elif sub_command == 'ldshell':
+        run_ldshell(**args)
     elif sub_command == 'shell':
-        haskell_env(command='bash', cmd_args="", tty=True, interactive=True, rm=True, **args)
+        args['interactive'] = not args.pop('no_interactive')
+        args['tty'] = not args.pop('no_tty')
+        if args['interactive']:
+            args['cmd_args'] = ''
+            haskell_env(command='bash', rm=True, **args)
+        else:
+            haskell_env(command='bash -c', rm=True, **args)
     elif sub_command == 'cabal':
-        haskell_env(command='/opt/ghc/bin/cabal', tty=True, interactive=True, rm=True, **args)
+        args['interactive'] = not args.pop('no_interactive')
+        args['tty'] = not args.pop('no_tty')
+        haskell_env(command='/opt/ghc/bin/cabal', rm=True, **args)
     else:
         parser.print_help()

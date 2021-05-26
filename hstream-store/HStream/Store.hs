@@ -1,108 +1,63 @@
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# LANGUAGE DeriveGeneric      #-}
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module HStream.Store
-  ( S.Topic
-  , S.TopicAttrs (..)
+  ( LDClient
+  , LDSyncCkpReader
+  , LSN
+  , pattern LSN_MAX
+  , pattern LSN_MIN
+  , pattern LSN_INVALID
 
-    -- * Producer
-  , ProducerRecord (..)
-  , ProducerConfig (..)
-  , Producer
-  , mkProducer
-  , sendMessage
-  , sendMessages
+  , newLDClient
+  , getMaxPayloadSize
+  , setClientSettings
+  , getClientSettings
+  , getTailLSN
+  , trim
 
-    -- * Consumer
-  , ConsumerRecord (..)
-  , ConsumerConfig (..)
-  , Consumer
-  , mkConsumer
-  , pollMessages
-  , seek
-  , commitOffsets
-  , commitAllOffsets
-
-    -- * Admin
-  , AdminClientConfig (..)
-  , AdminClient
-  , mkAdminClient
-  , createTopics
-  , doesTopicExists
+    -- * Stream
+  , module HStream.Store.Stream
 
     -- * Logger
   , module HStream.Store.Logger
 
     -- * Exception
   , module HStream.Store.Exception
+
+    -- * DEPRECATED
+  , ProducerConfig (..), Producer, mkProducer
+  , ConsumerConfig (..), Consumer, mkConsumer
+  , sendMessage , pollMessages
+  , AdminClientConfig (..), mkAdminClient, AdminClient
+  , createTopic_, doesTopicExists_
   ) where
 
-import           Control.Monad           (forM, forM_, void)
-import           Data.Int                (Int32, Int64)
-import           Data.Map.Strict         (Map)
-import qualified Data.Map.Strict         as Map
-import           Data.Word               (Word32)
-import           GHC.Generics            (Generic)
-import           Z.Data.CBytes           (CBytes)
-import qualified Z.Data.JSON             as JSON
-import           Z.Data.Vector           (Bytes)
-
 import           HStream.Store.Exception
+import           HStream.Store.Internal.LogDevice
+import           HStream.Store.Internal.Types
 import           HStream.Store.Logger
-import qualified HStream.Store.Stream    as S
+import           HStream.Store.Stream
+
+-- DEPRECATED {
+import           Control.Monad                    (forM, forM_, void)
+import           Data.Int
+import           Data.Map.Strict                  (Map)
+import qualified Data.Map.Strict                  as Map
+import           Data.Word
+import           Z.Data.CBytes                    (CBytes)
+-- }
 
 -------------------------------------------------------------------------------
+-- DEPRECATED
 
-data ProducerRecord = ProducerRecord
-  { dataInTopic     :: S.Topic
-  , dataInKey       :: Maybe CBytes
-  , dataInValue     :: Bytes
-  , dataInTimestamp :: Int64
-  } deriving (Show, Generic, JSON.JSON)
-
+{-# DEPRECATED ProducerConfig "" #-}
 newtype ProducerConfig = ProducerConfig { producerConfigUri :: CBytes }
-  deriving (Show, Generic, JSON.JSON)
+  deriving (Show)
 
-newtype Producer = Producer S.StreamClient
+{-# DEPRECATED Producer "" #-}
+newtype Producer = Producer LDClient
 
-mkProducer :: ProducerConfig -> IO Producer
-mkProducer config = do
-  client <- S.newStreamClient (producerConfigUri config)
-  return $ Producer client
-
-sendMessage :: Producer -> ProducerRecord -> IO ()
-sendMessage (Producer client) record@ProducerRecord{..} = do
-  topicID <- S.getTopicIDByName client dataInTopic
-  void $ S.appendAsync client topicID (JSON.encode record) Nothing return
-
--- FIXME: performance improvements
-sendMessages :: Producer -> [ProducerRecord] -> IO ()
-sendMessages producer xs = forM_ xs $ sendMessage producer
-
--------------------------------------------------------------------------------
-
-data ConsumerRecord = ConsumerRecord
-  { dataOutTopic     :: S.Topic
-  , dataOutOffset    :: S.SequenceNum
-  , dataOutKey       :: Maybe CBytes
-  , dataOutValue     :: Bytes
-  , dataOutTimestamp :: Int64
-  } deriving (Show, Generic, JSON.JSON)
-
-dataRecordToConsumerRecord :: S.DataRecord -> ConsumerRecord
-dataRecordToConsumerRecord S.DataRecord{..} = do
-  case JSON.decode' recordPayload of
-    Left _err -> error "JSON decode error!"
-    Right ProducerRecord{..} ->
-      ConsumerRecord { dataOutTopic     = dataInTopic
-                     , dataOutOffset    = recordLSN
-                     , dataOutKey       = dataInKey
-                     , dataOutValue     = dataInValue
-                     , dataOutTimestamp = dataInTimestamp
-                     }
-
+{-# DEPRECATED ConsumerConfig "" #-}
 data ConsumerConfig = ConsumerConfig
   { consumerConfigUri         :: CBytes
   , consumerName              :: CBytes
@@ -112,64 +67,62 @@ data ConsumerConfig = ConsumerConfig
     -- to the value in settings if it is -1
   , consumerCheckpointUri     :: CBytes
   , consumerCheckpointRetries :: Word32
-  } deriving (Show, Generic, JSON.JSON)
+  } deriving (Show)
 
+{-# DEPRECATED Consumer "" #-}
 data Consumer = Consumer
-  { _unConsumer     :: S.StreamSyncCheckpointedReader
-  , _consumerTopics :: Map S.Topic S.TopicID
+  { _unConsumer     :: LDSyncCkpReader
+  , _consumerTopics :: Map StreamName C_LogID
   }
 
-mkConsumer :: ConsumerConfig -> [S.Topic] -> IO Consumer
-mkConsumer ConsumerConfig{..} ts = do
-  client <- S.newStreamClient consumerConfigUri
-  topics <- forM ts $ \t -> do
-    topicID <- S.getTopicIDByName client t
-    lastSN <- S.getTailSequenceNum client topicID
-    return (topicID, lastSN)
-  -- Note that after you create a reader form client, then the client may be
-  -- "moved", which means all functions that receive client as an argument are
-  -- in an undefined behaviour.
-  reader <- S.newStreamReader client (fromIntegral $ length ts) consumerBufferSize
-  checkpointStore <- S.newFileBasedCheckpointStore consumerCheckpointUri
-  checkpointedReader <- S.newStreamSyncCheckpointReader consumerName reader checkpointStore consumerCheckpointRetries
-  forM_ topics $ \(topicID, lastSN)-> do
-    S.checkpointedReaderStartReading checkpointedReader topicID (lastSN + 1) maxBound
-  return $ Consumer checkpointedReader (Map.fromList $ zip ts (map fst topics))
+{-# DEPRECATED mkProducer "" #-}
+mkProducer :: ProducerConfig -> IO Producer
+mkProducer config = do
+  client <- newLDClient (producerConfigUri config)
+  return $ Producer client
 
+{-# DEPRECATED mkConsumer "" #-}
+mkConsumer :: ConsumerConfig -> [StreamName] -> IO Consumer
+mkConsumer ConsumerConfig{..} ts = do
+  client <- newLDClient consumerConfigUri
+  topics <- forM ts $ \t -> do
+    topicID <- getCLogIDByStreamName client t
+    lastSN <- getTailLSN client topicID
+    return (topicID, lastSN)
+  ckpReader <- newLDFileCkpReader client consumerName consumerCheckpointUri
+                                  (fromIntegral $ length ts) (Just consumerBufferSize)
+                                  consumerCheckpointRetries
+  forM_ topics $ \(topicID, lastSN)-> ckpReaderStartReading ckpReader topicID (lastSN + 1) LSN_MAX
+  return $ Consumer ckpReader (Map.fromList $ zip ts (map fst topics))
+
+{-# DEPRECATED sendMessage "" #-}
+sendMessage :: Producer -> ProducerRecord -> IO ()
+sendMessage (Producer client) record@ProducerRecord{..} = do
+  topicID <- getCLogIDByStreamName client dataInTopic
+  void $ appendRecord client topicID record Nothing
+
+{-# DEPRECATED pollMessages "" #-}
 pollMessages :: Consumer -> Int -> Int32 -> IO [ConsumerRecord]
 pollMessages (Consumer reader _) maxRecords timeout = do
-  void $ S.checkpointedReaderSetTimeout reader timeout
-  map dataRecordToConsumerRecord <$> S.checkpointedReaderRead reader maxRecords
+  void $ ckpReaderSetTimeout reader timeout
+  map decodeRecord <$> ckpReaderRead reader maxRecords
 
-seek :: Consumer -> S.Topic -> S.SequenceNum -> IO ()
-seek (Consumer reader topics) topic sn = do
-  case Map.lookup topic topics of
-    Just topicID -> S.checkpointedReaderStartReading reader topicID sn maxBound
-    Nothing      -> error $ "Can not find topic:" <> show topic
-
-commitOffsets :: Consumer -> [S.Topic] -> IO ()
-commitOffsets (Consumer checkpointedReader topics) ts = do
-  topicIDs <- forM ts $ \t ->
-    case Map.lookup t topics of
-      Just topicIDs -> return topicIDs
-      Nothing       -> error $ "Can not find topic:" <> show t
-  S.writeLastCheckpointsSync checkpointedReader topicIDs
-
-commitAllOffsets :: Consumer -> IO ()
-commitAllOffsets (Consumer checkpointedReader ts) =
-  S.writeLastCheckpointsSync checkpointedReader (Map.elems ts)
-
+{-# DEPRECATED AdminClientConfig "" #-}
 newtype AdminClientConfig = AdminClientConfig { adminConfigUri :: CBytes }
-newtype AdminClient = AdminClient S.StreamClient
 
+{-# DEPRECATED AdminClient "" #-}
+newtype AdminClient = AdminClient LDClient
+
+{-# DEPRECATED mkAdminClient "" #-}
 mkAdminClient :: AdminClientConfig -> IO AdminClient
 mkAdminClient AdminClientConfig{..} = do
-  client <- S.newStreamClient adminConfigUri
+  client <- newLDClient adminConfigUri
   return $ AdminClient client
 
-createTopics :: AdminClient -> Map S.Topic S.TopicAttrs -> IO ()
-createTopics (AdminClient client) = S.createTopicsSync client
+{-# DEPRECATED createTopic_ "" #-}
+createTopic_ :: AdminClient -> StreamName -> LogAttrs -> IO ()
+createTopic_ (AdminClient client) = createStream client
 
-doesTopicExists :: AdminClient -> S.Topic -> IO Bool
-doesTopicExists (AdminClient client) =
-  S.doesTopicExists client
+{-# DEPRECATED doesTopicExists_ "" #-}
+doesTopicExists_ :: AdminClient -> StreamName -> IO Bool
+doesTopicExists_ (AdminClient client) = doesStreamExists client

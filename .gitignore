@@ -22,7 +22,11 @@ cabal.project.local~
 .ghc.environment.*
 stack*.yaml.lock
 local*
+!localhost*
 Local*
 *~
 *.swp
 .idea/
+.vscode/
+gen-hs2/
+.DS_Store
