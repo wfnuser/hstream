@@ -58,8 +58,11 @@ import           Z.IO.Time                          (SystemTime (..),
                                                      getSystemTime')
 import           ZooKeeper.Types
 
+import           Database.MySQL.Base
 import           HStream.SQL.AST
 import           HStream.Server.ClickHouseConnector
+import           HStream.Server.MysqlConnector
+import           Network.Socket                     (PortNumber)
 
 --------------------------------------------------------------------------------
 
@@ -146,8 +149,13 @@ executeQueryHandler ServerContext{..} (ServerNormalRequest _metadata CommandQuer
           let fromCOptionString m = case m of
                 Just (ConstantString s) -> Just $ C.pack s
                 _                       -> Nothing
-          -- build sink connector by type
-          let sk = case typeM of
+          let fromCOptionStringToString m = case m of
+                Just (ConstantString s) -> Just s
+                _                       -> Nothing
+          let fromCOptionIntToPortNumber m = case m of
+                Just (ConstantInt s) -> Just $ fromIntegral s
+                _                    -> Nothing
+          let sk' = case typeM of
                 Just (ConstantString cType) ->
                   do
                     case cType of
@@ -157,7 +165,7 @@ executeQueryHandler ServerContext{..} (ServerNormalRequest _metadata CommandQuer
                           let port = fromMaybe "9000" $ fromCOptionString (lookup "port" cOptions)
                           let password = fromMaybe "" $ fromCOptionString (lookup "password" cOptions)
                           let database = fromMaybe "default" $ fromCOptionString (lookup "database" cOptions)
-                          let cli = clickHouseSinkConnector $ createClient ConnParams{
+                          conn <- createClient ConnParams{
                             username'     = username
                             ,host'        = host
                             ,port'        = port
@@ -165,9 +173,27 @@ executeQueryHandler ServerContext{..} (ServerNormalRequest _metadata CommandQuer
                             ,compression' = False
                             ,database'    = database
                           }
-                          Right cli
-                        _ -> Left "unsupported sink connector type"
-                _ -> Left "invalid type in connector options"
+                          let cli = clickHouseSinkConnector conn
+                          return $ Right cli
+                        "mysql" -> do
+                          let username = fromMaybe "default" $ fromCOptionString (lookup "username" cOptions)
+                          let host = fromMaybe "127.0.0.1" $ fromCOptionStringToString (lookup "host" cOptions)
+                          let port = fromMaybe 3306 $ fromCOptionIntToPortNumber (lookup "port" cOptions)
+                          let password = fromMaybe "password" $ fromCOptionString (lookup "password" cOptions)
+                          let database = fromMaybe "mysql" $ fromCOptionString (lookup "database" cOptions)
+                          conn <- connect ConnectInfo {
+                            ciUser = username,
+                            ciPassword = password,
+                            ciPort = 3306,
+                            ciHost = host,
+                            ciDatabase = database,
+                            ciCharset = 33
+                          }
+                          let cli = mysqlSinkConnector conn
+                          return $ Right cli
+                        _ -> return $ Left "unsupported sink connector type"
+                _ -> return $ Left "invalid type in connector options"
+          sk <- sk'
           case sk of
             Left err -> do
                 let resp = genErrorQueryResponse err

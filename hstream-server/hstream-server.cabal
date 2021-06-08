@@ -27,16 +27,17 @@ library
     HStream.Server.Persistence
     HStream.Server.Utils
     HStream.Server.ClickHouseConnector
+    HStream.Server.MysqlConnector
     HStream.Server.Converter
     ThirdParty.Google.Protobuf.Struct
 
   other-modules:
   hs-source-dirs:   src gen-src
   build-depends:
-    , clickhouse-haskell
     , aeson
     , base
     , bytestring
+    , clickhouse-haskell
     , containers
     , deepseq
     , grpc-haskell
@@ -45,6 +46,8 @@ library
     , hstream-sql
     , hstream-store
     , haxl
+    , mysql-haskell
+    , network
     , proto3-suite
     , proto3-wire
     , random

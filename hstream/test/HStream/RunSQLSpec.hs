@@ -29,6 +29,9 @@ import           Database.ClickHouseDriver.Types
 import           HStream.SQL.AST
 import           HStream.Server.ClickHouseConnector
 
+import           Database.MySQL.Base
+import           HStream.Server.MysqlConnector
+
 ldclient :: LDClient
 ldclient = unsafePerformIO $ newLDClient  "/data/store/logdevice.conf"
 {-# NOINLINE ldclient #-}
@@ -62,7 +65,8 @@ spec = describe "HStream.RunSQLSpec" $ do
 
   it "create connectors" $
     (do
-      handleCreateConnectorSQL $ "CREATE SOURCE | SINK CONNECTOR clickhouse1 WITH (type = \"clickhouse\", streamname = \""<> source1 <>"\");"
+      handleCreateConnectorSQL $ "CREATE SOURCE | SINK CONNECTOR mysql1 WITH (type = \"mysql\", host = \"host.docker.internal\", streamname = \""<> source1 <>"\");"
+      handleCreateConnectorSQL $ "CREATE SOURCE | SINK CONNECTOR clickhouse1 WITH (type = \"clickhouse\", host = \"host.docker.internal\", port = 3306, streamname = \""<> source1 <>"\");"
       handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (12, 84);"
       handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (22, 83);"
       handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (32, 82);"
@@ -130,11 +134,16 @@ handleCreateConnectorSQL sql = do
           let sc = hstoreSourceConnector ldclient ldreader
           let streamM = lookup "streamname" cOptions
           let typeM = lookup "type" cOptions
-          let resp = genSuccessQueryResponse
           let fromCOptionString m = case m of
                 Just (ConstantString s) -> Just $ C.pack s
                 _                       -> Nothing
-          let sk = case typeM of
+          let fromCOptionStringToString m = case m of
+                Just (ConstantString s) -> Just s
+                _                       -> Nothing
+          let fromCOptionIntToPortNumber m = case m of
+                Just (ConstantInt s) -> Just $ fromIntegral s
+                _                    -> Nothing
+          let sk' = case typeM of
                 Just (ConstantString cType) ->
                   do
                     case cType of
@@ -144,7 +153,7 @@ handleCreateConnectorSQL sql = do
                           let port = fromMaybe "9000" $ fromCOptionString (lookup "port" cOptions)
                           let password = fromMaybe "" $ fromCOptionString (lookup "password" cOptions)
                           let database = fromMaybe "default" $ fromCOptionString (lookup "database" cOptions)
-                          let cli = clickHouseSinkConnector $ createClient ConnParams{
+                          conn <- createClient ConnParams{
                               username'     = username
                               ,host'        = host
                               ,port'        = port
@@ -152,11 +161,30 @@ handleCreateConnectorSQL sql = do
                               ,compression' = False
                               ,database'    = database
                           }
-                          Right cli
-                        _ -> Left "unsupported sink connector"
-                _ -> Left "Invalid type in connector options"
+                          let cli = clickHouseSinkConnector conn
+                          return $ Right cli
+                        "mysql" -> do
+                          let username = fromMaybe "root" $ fromCOptionString (lookup "username" cOptions)
+                          let host = fromMaybe "127.0.0.1" $ fromCOptionStringToString (lookup "host" cOptions)
+                          let port = fromMaybe 3306 $ fromCOptionIntToPortNumber (lookup "port" cOptions)
+                          let password = fromMaybe "password" $ fromCOptionString (lookup "password" cOptions)
+                          let database = fromMaybe "mysql" $ fromCOptionString (lookup "database" cOptions)
+                          conn <- connect ConnectInfo {
+                            ciUser = username,
+                            ciPassword = password,
+                            ciPort = 3306,
+                            ciHost = host,
+                            ciDatabase = database,
+                            ciCharset = 33
+                          }
+                          let cli = mysqlSinkConnector conn
+                          return $ Right cli
+                        _ -> return $ Left "unsupported sink connector"
+                _ -> return $ Left "Invalid type in connector options"
+          sk <- sk'
           case sk of
-            Left err -> error err
+            Left err -> do
+              error err
             Right sk -> do
               case streamM of
                 Just (ConstantString stream) -> do

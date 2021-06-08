@@ -75,6 +75,7 @@ test-suite hstream-test
     , base                >=4.11 && <5
     , bytestring
     , clickhouse-haskell
+    , mysql-haskell
     , hspec
     , hstream-processing
     , hstream-server
@@ -84,6 +85,7 @@ test-suite hstream-test
     , rio
     , scientific
     , Z-Data
+    , debug
 
   default-language:   Haskell2010
   build-tool-depends: hspec-discover:hspec-discover ==2.*
