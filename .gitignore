@@ -28,5 +28,26 @@ Local*
 *.swp
 .idea/
 .vscode/
+gen/
+gen-hs/
 gen-hs2/
+gen-sql/
+gen-cpp/
+gen-go/
+generated-src/
+gen-src/
 .DS_Store
+swagger.json
+/script/dev_deploy_conf.json
+
+## helm chart dependencies
+deploy/chart/hstream/charts/*
+
+## v1/v2 sql switching
+hstream-sql/etc/SQL.cf
+
+## hstream version
+common/hstream/HStream/Version.hs
+
+## for python env
+.pyenv

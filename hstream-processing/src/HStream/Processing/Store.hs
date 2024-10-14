@@ -8,24 +8,29 @@ module HStream.Processing.Store
   ( KVStore (..),
     SessionStore (..),
     TimestampedKVStore (..),
-    StateStore,
+    StateStore (..),
     InMemoryKVStore,
     -- mkInMemoryKVStore,
     mkInMemoryStateKVStore,
     mkDEKVStore,
-    EKVStore,
-    DEKVStore,
+    EKVStore(..),
+    DEKVStore(..),
+    fromDEKVStoreToEKVStore,
     InMemorySessionStore,
     -- mkInMemorySessionStore,
     mkInMemoryStateSessionStore,
     fromEStateStoreToKVStore,
     fromEStateStoreToSessionStore,
+    fromDESessionStoreToESessionStore,
     wrapStateStore,
-    EStateStore,
-    ESessionStore,
+    EStateStore(..),
+    ESessionStore(..),
+    DESessionStore(..),
     mkInMemoryStateTimestampedKVStore,
-    ETimestampedKVStore,
+    ETimestampedKVStore(..),
+    DETimestampedKVStore(..),
     fromEStateStoreToTimestampedKVStore,
+    fromDETimestampedKVStoreToETimestampedKVStore
   )
 where
 
@@ -53,9 +58,11 @@ mkInMemoryKVStore = do
       }
 
 class KVStore s where
-  ksGet :: Ord k => k -> s k v -> IO (Maybe v)
-  ksPut :: Ord k => k -> v -> s k v -> IO ()
-  ksRange :: Ord k => k -> k -> s k v -> IO [(k, v)]
+  ksGet :: (Ord k) => k -> s k v -> IO (Maybe v)
+  ksPut :: (Ord k) => k -> v -> s k v -> IO ()
+  ksRange :: (Ord k) => k -> k -> s k v -> IO [(k, v)]
+  ksDump :: (Ord k) => s k v -> IO (Map.Map k v)
+  ksImport :: (Ord k) => s k v -> Map.Map k v -> IO ()
 
 instance KVStore InMemoryKVStore where
   ksGet k InMemoryKVStore {..} = do
@@ -77,9 +84,13 @@ instance KVStore InMemoryKVStore where
       Just rm -> return $ Map.toAscList rm
       Nothing -> return $ Map.toAscList sm
 
+  ksDump InMemoryKVStore {..} = readIORef imksData
+
+  ksImport InMemoryKVStore {..} extData = atomicWriteIORef imksData extData
+
 data EKVStore k v
   = forall s.
-    KVStore s =>
+    (KVStore s) =>
     EKVStore
       (s k v)
 
@@ -96,6 +107,10 @@ instance KVStore EKVStore where
 
   ksRange fromKey toKey (EKVStore s) = ksRange fromKey toKey s
 
+  ksDump (EKVStore s) = ksDump s
+
+  ksImport (EKVStore s) extData = ksImport s extData
+
 mkDEKVStore ::
   (KVStore s, Typeable k, Typeable v, Ord k) =>
   s k v ->
@@ -109,7 +124,7 @@ fromDEKVStoreToEKVStore ::
 fromDEKVStoreToEKVStore (DEKVStore eStore) =
   case cast eStore of
     Just es -> es
-    Nothing -> throw $ TypeCastError "fromDEKVStoreToEKVStore: type cast error"
+    Nothing -> throw $ TypeCastError $ "fromDEKVStoreToEKVStore: type cast error" <> (T.pack . show $ typeOf eStore)
 
 data StateStore k v
   = KVStateStore (EKVStore k v)
@@ -135,21 +150,22 @@ class SessionStore s where
   ssGet :: (Typeable k, Ord k) => SessionWindowKey k -> s k v -> IO (Maybe v)
   ssPut :: (Typeable k, Ord k) => SessionWindowKey k -> v -> s k v -> IO ()
   ssRemove :: (Typeable k, Ord k) => SessionWindowKey k -> s k v -> IO ()
+  ssDump :: (Typeable k, Ord k) => s k v -> IO (Map Timestamp (Map k (Map Timestamp v)))
+  ssImport :: (Typeable k, Ord k) => s k v -> Map Timestamp (Map k (Map Timestamp v)) -> IO ()
   findSessions :: (Typeable k, Ord k) => k -> Timestamp -> Timestamp -> s k v -> IO [(SessionWindowKey k, v)]
 
 data ESessionStore k v
   = forall s.
-    SessionStore s =>
+    (SessionStore s) =>
     ESessionStore
       (s k v)
 
 instance SessionStore ESessionStore where
   ssGet k (ESessionStore s) = ssGet k s
-
   ssPut k v (ESessionStore s) = ssPut k v s
-
   ssRemove k (ESessionStore s) = ssRemove k s
-
+  ssDump (ESessionStore s) = ssDump s
+  ssImport (ESessionStore s) extData = ssImport s extData
   findSessions k ts1 ts2 (ESessionStore s) = findSessions k ts1 ts2 s
 
 data DESessionStore
@@ -230,6 +246,16 @@ instance SessionStore InMemorySessionStore where
           Nothing -> return ()
       Nothing -> return ()
 
+  -- do nothing but lift nested IO and Map
+  ssDump store = do
+    store <- imssData store & readIORef
+    store <- (fmap . fmap) readIORef <$> readIORef <$> store & sequence
+    sequence <$> store & sequence
+
+  ssImport store extData = do
+    extData' <- mapM ((newIORef =<<) . mapM newIORef) extData
+    atomicWriteIORef (imssData store) extData'
+
   findSessions key earliestSessionEndTime latestSessionStartTime InMemorySessionStore {..} = do
     dict0 <- readIORef imssData
     let (_, mv0, tailDict0') = Map.splitLookup earliestSessionEndTime dict0
@@ -283,7 +309,7 @@ fromEStateStoreToKVStore ::
 fromEStateStoreToKVStore eStore =
   case eStore of
     EKVStateStore s -> fromDEKVStoreToEKVStore s
-    _ -> throw $ UnExpectedStateStoreType "expect KVStateStore"
+    _               -> throw $ UnExpectedStateStoreType "expect KVStateStore"
 
 fromEStateStoreToSessionStore ::
   (Typeable k, Typeable v, Ord k) =>
@@ -304,9 +330,11 @@ fromEStateStoreToTimestampedKVStore eStore =
     _ -> throw $ UnExpectedStateStoreType "expect TimestampdKVStateStore"
 
 class TimestampedKVStore s where
-  tksGet :: Ord k => TimestampedKey k -> s k v -> IO (Maybe v)
-  tksPut :: Ord k => TimestampedKey k -> v -> s k v -> IO ()
-  tksRange :: Ord k => TimestampedKey k -> TimestampedKey k -> s k v -> IO [(TimestampedKey k, v)]
+  tksGet :: (Ord k) => TimestampedKey k -> s k v -> IO (Maybe v)
+  tksPut :: (Ord k) => TimestampedKey k -> v -> s k v -> IO ()
+  tksRange :: (Ord k) => TimestampedKey k -> TimestampedKey k -> s k v -> IO [(TimestampedKey k, v)]
+  tksDump :: (Ord k) => s k v -> IO (Map Int64 (Map k v))
+  tksImport :: (Ord k) => s k v -> Map Int64 (Map k v) -> IO ()
 
 data InMemoryTimestampedKVStore k v = InMemoryTimestampedKVStore
   { imtksData :: IORef (Map Int64 (IORef (Map k v)))
@@ -354,7 +382,7 @@ instance TimestampedKVStore InMemoryTimestampedKVStore where
       Just rm -> genR innerKey rm
       Nothing -> genR innerKey sm
     where
-      genR :: Ord k => k -> Map Int64 (IORef (Map k v)) -> IO [(TimestampedKey k, v)]
+      genR :: (Ord k) => k -> Map Int64 (IORef (Map k v)) -> IO [(TimestampedKey k, v)]
       -- 需要遍历这个 map,
       -- 找到 key 匹配的然后返回.
       genR key dict =
@@ -363,15 +391,22 @@ instance TimestampedKVStore InMemoryTimestampedKVStore where
               acc <- macc
               map2 <- readIORef rmap2
               case Map.lookup key map2 of
-                Just v -> return $ acc ++ [(mkTimestampedKey key ts, v)]
+                Just v  -> return $ acc ++ [(mkTimestampedKey key ts, v)]
                 Nothing -> return acc
           )
           (return [])
           dict
+  tksDump store = do
+    store <- imtksData store & readIORef
+    readIORef <$> store & sequence
+
+  tksImport store extData = do
+    extData' <- mapM newIORef extData
+    atomicWriteIORef (imtksData store) extData'
 
 data ETimestampedKVStore k v
   = forall s.
-    TimestampedKVStore s =>
+    (TimestampedKVStore s) =>
     ETimestampedKVStore
       (s k v)
 
@@ -388,7 +423,7 @@ fromDETimestampedKVStoreToETimestampedKVStore ::
 fromDETimestampedKVStoreToETimestampedKVStore (DETimestampedKVStore eStore) =
   case cast eStore of
     Just es -> es
-    Nothing -> throw $ TypeCastError "fromDEKVStoreToEKVStore: type cast error"
+    Nothing -> throw $ TypeCastError $ "fromDETimestampedKVStoreToETimestampedKVStore: type cast error, actual eStore type is " `T.append` T.pack (show $ typeOf eStore)
 
 instance TimestampedKVStore ETimestampedKVStore where
   tksGet k (ETimestampedKVStore s) = tksGet k s
@@ -396,3 +431,7 @@ instance TimestampedKVStore ETimestampedKVStore where
   tksPut k v (ETimestampedKVStore s) = tksPut k v s
 
   tksRange fromKey toKey (ETimestampedKVStore s) = tksRange fromKey toKey s
+
+  tksDump (ETimestampedKVStore s) = tksDump s
+
+  tksImport (ETimestampedKVStore s) extData = tksImport s extData

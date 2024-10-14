@@ -22,7 +22,7 @@ import           System.Random
 
 data R = R
   { temperature :: Int,
-    humidity :: Int
+    humidity    :: Int
   }
   deriving (Generic, Show, Typeable)
 
@@ -51,28 +51,28 @@ main = do
           { serializer = Serializer TLE.encodeUtf8,
             deserializer = Deserializer TLE.decodeUtf8
           } ::
-          Serde TL.Text
+          Serde TL.Text BL.ByteString
   let rSerde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R
+          Serde R BL.ByteString
   let r1Serde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R1
+          Serde R1 BL.ByteString
   let streamSourceConfig =
         HS.StreamSourceConfig
-          { sscTopicName = "demo-source",
+          { sscStreamName = "demo-source",
             sscKeySerde = textSerde,
             sscValueSerde = rSerde
           }
   let streamSinkConfig =
         HS.StreamSinkConfig
-          { sicTopicName = "demo-sink",
+          { sicStreamName = "demo-sink",
             sicKeySerde = textSerde,
             sicValueSerde = r1Serde
           }

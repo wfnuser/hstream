@@ -10,16 +10,16 @@ import           Foreign.Ptr
 import           Foreign.StablePtr
 import           GHC.Conc
 import           GHC.Stack
-import           Z.Data.CBytes                  (CBytes)
 import qualified Z.Data.CBytes                  as CBytes
+import           Z.Data.CBytes                  (CBytes)
 import           Z.Data.Vector                  (Bytes)
-import           Z.Foreign                      (BA#)
 import qualified Z.Foreign                      as Z
 
+import           HStream.Foreign                (BA# (..), MBA# (..))
+import qualified HStream.Logger                 as Log
 import qualified HStream.Store.Exception        as E
 import           HStream.Store.Internal.Foreign
 import           HStream.Store.Internal.Types
-import qualified HStream.Store.Logger           as Log
 
 -------------------------------------------------------------------------------
 
@@ -56,7 +56,7 @@ vcsGetConfig
   -> IO Bytes
 vcsGetConfig vcs key m_base_version auto_retries =
   withForeignPtr vcs $ \vcs' -> CBytes.withCBytesUnsafe key $ \key' ->
-    go vcs' key' auto_retries
+    go vcs' (BA# key') auto_retries
   where
     go vcs' key' retries = do
       cbData <- run vcs' key'
@@ -70,9 +70,10 @@ vcsGetConfig vcs key m_base_version auto_retries =
         _ -> E.throwStreamError st callStack
     run vcs' key' =
       case m_base_version of
-        Just bv -> snd <$> (Z.withPrimUnsafe bv $ \ver_ -> fst <$> f (c_logdevice_vcs_get_config vcs' key' (unsafeFreezeBA# ver_)))
-        Nothing -> fst <$> f (c_logdevice_vcs_get_config' vcs' key' nullPtr)
-    f = withAsync' vcsValueCallbackDataSize peekVcsValueCallbackData pure
+        Just bv -> fmap snd $ Z.withPrimUnsafe bv $ \ver_ ->
+          f $ c_logdevice_vcs_get_config vcs' key' (unsafeFreezeBA# (MBA# ver_))
+        Nothing -> f $ c_logdevice_vcs_get_config' vcs' key' nullPtr
+    f = withAsyncVoid vcsValueCallbackDataSize peekVcsValueCallbackData
 
 vcsGetConfig'
   :: HasCallStack
@@ -90,11 +91,11 @@ ldVcsGetLatestConfig
   -> IO Bytes
 ldVcsGetLatestConfig vcs key auto_retries =
   withForeignPtr vcs $ \vcs' -> CBytes.withCBytesUnsafe key $ \key' ->
-    go vcs' key' auto_retries
+    go vcs' (BA# key') auto_retries
   where
     go vcs' key' retries = do
-      (cbData, _) <- withAsync' vcsValueCallbackDataSize peekVcsValueCallbackData pure
-                                (c_logdevice_vcs_get_latest_config vcs' key')
+      cbData <- withAsyncVoid vcsValueCallbackDataSize peekVcsValueCallbackData
+                              (c_logdevice_vcs_get_latest_config vcs' key')
       let st = vcsValCallbackSt cbData
       case st of
         C_OK -> return $ vcsValCallbackVal cbData
@@ -148,11 +149,11 @@ ldVcsUpdateConfig vcs key val cond auto_retries =
   withForeignPtr vcs $ \vcs' ->
   CBytes.withCBytesUnsafe key $ \key' ->
     Z.withPrimVectorUnsafe val $ \val' offset len ->
-      go vcs' key' val' offset len auto_retries
+      go vcs' (BA# key') (BA# val') offset len auto_retries
   where
     go vcs' key' val' offset len retries = do
-      (cbData, _) <- withAsync' vcsWriteCallbackDataSize peekVcsWriteCallbackData pure
-                                (c_logdevice_vcs_update_config vcs' key' val' offset len cond_mode cond_ver_)
+      cbData <- withAsyncVoid vcsWriteCallbackDataSize peekVcsWriteCallbackData
+                              (c_logdevice_vcs_update_config vcs' key' val' offset len cond_mode cond_ver_)
       let st = vcsWriteCallbackSt cbData
       case st of
         C_OK -> return (vcsWriteCallbackVersion cbData, vcsWriteCallbackValue cbData)
@@ -161,7 +162,7 @@ ldVcsUpdateConfig vcs key val cond auto_retries =
           | retries < 0 -> threadDelay 5000 >> (go vcs' key' val' offset len $! (- 1))
           | retries > 0 -> threadDelay 5000 >> (go vcs' key' val' offset len $! (retries - 1))
         C_VERSION_MISMATCH -> do
-          Log.warning "VersoinedConfigStore update config: VERSION_MISMATCH" >> Log.flushDefaultLogger
+          Log.warning "VersoinedConfigStore update config: VERSION_MISMATCH"
           return (vcsWriteCallbackVersion cbData, vcsWriteCallbackValue cbData)
         _ -> E.throwStreamError st callStack
     (cond_mode, cond_ver_) = toCVcsConditionMode cond

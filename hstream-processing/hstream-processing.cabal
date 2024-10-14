@@ -5,7 +5,7 @@ synopsis:
   High performance stream processing platform for IoT data written in Haskell.
 
 description:
-  Please see the README on Github at
+  Please see the README on GitHub at
   <https://github.com/hstreamdb/hstream#readme>
 
 license:            BSD-3-Clause
@@ -23,14 +23,41 @@ source-repository head
   type:     git
   location: https://github.com/hstreamdb/hstream
 
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
+
+flag hstream_enable_schema
+  default:     False
+  description:
+    Save schema with streams and enable schema-related pipelines
+
+common shared-properties
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
+
+  if flag(hstream_enable_schema)
+    cpp-options: -DHStreamEnableSchema
+
 library
+  import:           shared-properties
   exposed-modules:
     HStream.Processing.Connector
     HStream.Processing.Encoding
     HStream.Processing.Error
     HStream.Processing.MockStreamStore
     HStream.Processing.Processor
+    HStream.Processing.Processor.ChangeLog
     HStream.Processing.Processor.Internal
+    HStream.Processing.Processor.Snapshot
     HStream.Processing.Store
     HStream.Processing.Stream
     HStream.Processing.Stream.GroupedStream
@@ -46,132 +73,146 @@ library
 
   hs-source-dirs:   src
   build-depends:
-    , base              >=4.11 && <5
+    , aeson
+    , base                  >=4.11 && <5
     , binary
     , bytestring
+    , containers
     , data-default
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-stats
     , rio
+    , scientific
     , template-haskell
+    , text
     , time
+    , unordered-containers
 
   -- hstream-store
   default-language: Haskell2010
-  ghc-options:      -Wall
 
-executable processor-example0
-  main-is:          ProcessorExample0.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , hstream-processing
-    , random
-    , rio
-    , text
+--executable processor-example0
+--  import:           shared-properties
+--  main-is:          ProcessorExample0.hs
+--  hs-source-dirs:   example
+--  build-depends:
+--    , aeson
+--    , base                >=4.11 && <5
+--    , hstream-processing
+--    , random
+--    , rio
+--    , text
+--  default-language: Haskell2010
 
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable processor-example1
-  main-is:          ProcessorExample1.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example0
-  main-is:          StreamExample0.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example1
-  main-is:          StreamExample1.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example2
-  main-is:          StreamExample2.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example3
-  main-is:          StreamExample3.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example4
-  main-is:          StreamExample4.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
-
-executable stream-example5
-  main-is:          StreamExample5.hs
-  hs-source-dirs:   example
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , binary
-    , hstream-processing
-    , random
-    , rio
-    , text
-
-  default-language: Haskell2010
-  ghc-options:      -Wall
+-- executable processor-example1
+--   import:           shared-properties
+--   main-is:          ProcessorExample1.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example0
+--   import:           shared-properties
+--   main-is:          StreamExample0.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example1
+--   import:           shared-properties
+--   main-is:          StreamExample1.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example2
+--   import:           shared-properties
+--   main-is:          StreamExample2.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example3
+--   import:           shared-properties
+--   main-is:          StreamExample3.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+-- --     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example4
+--   import:           shared-properties
+--   main-is:          StreamExample4.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010
+--
+-- executable stream-example5
+--   import:           shared-properties
+--   main-is:          StreamExample5.hs
+--   hs-source-dirs:   example
+--   build-depends:
+--     , aeson
+--     , base                >=4.11 && <5
+--     , binary
+--     , bytestring
+--     , hstream-processing
+--     , random
+--     , rio
+--     , text
+--
+--   default-language: Haskell2010

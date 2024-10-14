@@ -1,45 +1,76 @@
 packages:
-  hstream
-  hstream-hesp
+  -- * External
+  external/proto3-wire/proto3-wire.cabal
+  external/proto3-suite/proto3-suite.cabal
+  external/hs-grpc/hs-grpc-server/hs-grpc-server.cabal
+  external/gRPC-haskell/grpc-haskell.cabal
+  external/gRPC-haskell/core/grpc-haskell-core.cabal
+  external/haskell-rocksdb-bindings
+  external/gsasl-hs/gsasl-hs.cabal
+
+  -- * Cpp library
+  common/api/cpp/hstream-api-cpp.cabal
+  clients/cpp/hstream-client-cpp.cabal
+
+  -- * HStream common
+  common/base/hstream-common-base.cabal
+  common/api/hstream-api-hs.cabal
+  common/hstream/hstream-common.cabal
+  common/stats/hstream-common-stats.cabal
+  common/server/hstream-common-server.cabal
+
   hstream-store
-  hstream-store/admin/hstore-admin.cabal
+  hstream-diffflow
   hstream-processing
   hstream-sql
-  hstream-server
+  hstream-io
+  hstream-gossip
+  hstream-admin/server/hstream-admin-server.cabal
+  hstream-kafka
+  hstream
+  hstream-admin/hstream-admin.cabal
 
-  external/gRPC-haskell
-  external/gRPC-haskell/core
-  external/hsthrift/common/util/fb-util.cabal
-  external/hsthrift/common/github/fb-stubs.cabal
-  external/hsthrift/common/mangle/mangle.cabal
-  external/hsthrift/lib/thrift-lib.cabal
-  external/hsthrift/cpp-channel/thrift-cpp-channel.cabal
-
--- https://github.com/haskell/cabal/issues/4271
-package thrift-lib
-  flags: +use_sys_thrift_compiler
+package proto3-wire
   tests: false
 
-package fb-util
+package proto3-suite
   tests: false
 
-package fb-stubs
-  tests: false
-
-package mangle
-  tests: false
-
-package thrift-cpp-channel
+package hs-grpc-server
+  flags: +hsgrpc_use_protosuite
   tests: false
 
 package grpc-haskell
+  flags: +grpc_eliminate_insecure_build
   tests: false
 
 package grpc-haskell-core
+  flags: +grpc_eliminate_insecure_build
   tests: false
 
+package rocksdb-haskell-bindings
+  extra-include-dirs: /usr/local/include
+  extra-lib-dirs:     /usr/local/lib
+  tests: false
+
+-- TODO: More safe way to detect cpu features
+package digest
+if (arch(x86_64) && os(linux))
+  flags: +have_builtin_prefetch +have_sse42 +have_strong_getauxval +have_weak_getauxval
+else
+  flags: +have_builtin_prefetch +have_weak_getauxval
+
 constraints:
-    Z-IO == 0.8.0.0
-  , Z-Data == 0.8.2.0
-  , proto3-suite == 0.4.1
-  , proto3-wire == 1.2.1
+    Z-Data      == 2.0.0.2
+  , zoovisitor  == 0.2.6.1
+  , criterion  ^>= 1.6
+  , aeson      ^>= 2.1
+
+  -- rocksdb-haskell-bindings cant be built with streamly-0.10
+  , streamly   ^>= 0.9
+
+  -- The following is needed to avoid breaking the build.
+  , blaze-textual == 0.2.1.0 || > 0.2.2.0
+  , entropy == 0.4.1.7 || > 0.4.1.9
+    -- https://github.com/nikita-volkov/deferred-folds/issues/6
+  , deferred-folds == 0.9.18.3 || > 0.9.18.4

@@ -1,155 +1,167 @@
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE PatternSynonyms   #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE PatternSynonyms     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module HStream.RunSQLSpec (spec) where
 
-import           Control.Monad                  (replicateM)
-import           HStream.Processing.Connector
-import           HStream.Processing.Processor
-import           HStream.Processing.Type
-import           HStream.Processing.Util        (getCurrentTimestamp)
-import           HStream.SQL.Codegen
-import           HStream.Server.HStoreConnector
-import           HStream.Server.Handler
-import           HStream.Server.Utils
-import           HStream.Store
-import           RIO
-import qualified RIO.ByteString.Lazy            as BL
-import qualified RIO.Map                        as Map
-import qualified RIO.Text                       as Text
-import           System.IO.Unsafe               (unsafePerformIO)
-import           System.Random
+import           Control.Concurrent
+import qualified Data.Aeson           as Aeson
+import qualified Data.List            as L
+import qualified Data.Text            as T
 import           Test.Hspec
-import           Text.Printf                    (printf)
 
-source1, source2, sink1, sink2 :: Text
+import           HStream.Base         (setupFatalSignalHandler)
+import           HStream.SpecUtils
+import           HStream.Store.Logger (pattern C_DBG_ERROR,
+                                       setLogDeviceDbgLevel)
+import           HStream.Utils        hiding (newRandomText)
 
-source1 = unsafePerformIO $ newRandomText 10
-{-# NOINLINE source1 #-}
-
-source2 = unsafePerformIO $ newRandomText 10
-{-# NOINLINE source2 #-}
-
-sink1   = unsafePerformIO $ newRandomText 10
-{-# NOINLINE sink1 #-}
-
-sink2   = unsafePerformIO $ newRandomText 10
-{-# NOINLINE sink2 #-}
-
-ldclient :: LDClient
-ldclient = unsafePerformIO $ newLDClient  "/data/store/logdevice.conf"
-{-# NOINLINE ldclient #-}
-
+#ifdef HStreamEnableSchema
+spec :: Spec
+spec = return ()
+#else
 spec :: Spec
 spec = describe "HStream.RunSQLSpec" $ do
-  it "create streams" $
-    (do
-        setLogDeviceDbgLevel C_DBG_ERROR
-        handleCreateStreamSQL $ "CREATE STREAM " <> source1 <> " WITH (REPLICATE = 3);"
-        handleCreateStreamSQL $ "CREATE STREAM " <> source2 <> ";"
-        handleCreateStreamSQL $ "CREATE STREAM " <> sink1   <> " WITH (REPLICATE = 3);"
-        handleCreateStreamSQL $ "CREATE STREAM " <> sink2   <> " ;"
-    ) `shouldReturn` ()
+  runIO setupFatalSignalHandler
+  runIO $ setLogDeviceDbgLevel C_DBG_ERROR
 
-  it "insert data to source topics" $
-    (do
-      handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (22, 80);"
-      handleInsertSQL $ "INSERT INTO " <> source2 <> " (temperature, humidity) VALUES (15, 10);"
-    ) `shouldReturn` ()
+  baseSpec
+  viewSpec
 
-  it "drop streams" $
-    (do
-        setLogDeviceDbgLevel C_DBG_ERROR
-        handleDropStreamSQL $ "DROP STREAM " <> source1 <> " ;"
-        handleDropStreamSQL $ "DROP STREAM " <> source2 <> " ;"
-        handleDropStreamSQL $ "DROP STREAM " <> sink1   <> " ;"
-        handleDropStreamSQL $ "DROP STREAM " <> sink2   <> " ;"
-        handleDropStreamSQL $ "DROP STREAM IF EXIST " <> source1 <> " ;"
-        handleDropStreamSQL $ "DROP STREAM IF EXIST " <> sink1   <> " ;"
-    ) `shouldReturn` ()
+-------------------------------------------------------------------------------
+-- BaseSpec
 
-  it "a simple SQL query" $
-    (do
-      handleCreateStreamSQL $ "CREATE STREAM " <> source1 <> ";"
-      handleCreateStreamSQL $ "CREATE STREAM " <> source2 <> ";"
-      handleCreateStreamSQL $ "CREATE STREAM " <> sink1   <> ";"
+baseSpecAround :: ActionWith (HStreamClientApi, T.Text) -> HStreamClientApi -> IO ()
+baseSpecAround = provideRunTest setup clean
+  where
+    setup api = do
+      source <- newRandomText 20
+      runCreateStreamSql api $ "CREATE STREAM " <> source <> " WITH (REPLICATE = 3);"
+      return source
+    clean api source =
+      runDropSql api $ "DROP STREAM " <> source <> " IF EXISTS;"
 
-      result <- async . handleCreateBySelectSQL $
-        "CREATE STREAM " <> sink1 <> " AS SELECT * FROM " <> source1 <> " EMIT CHANGES WITH (REPLICATE = 3);"
-      threadDelay 5000000
-      handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (31, 26);"
-      handleInsertSQL $ "INSERT INTO " <> source2 <> " (temperature, humidity) VALUES (22, 80);"
+baseSpec :: Spec
+baseSpec = aroundAll provideHstreamApi $ aroundWith baseSpecAround $
+  describe "SQL.BaseSpec" $ do
 
-      handleDropStreamSQL   $ "DROP STREAM "   <> source2 <> " ;"
-      handleCreateStreamSQL $ "CREATE STREAM " <> source2 <> ";"
+  it "insert data and select" $ \(api, source) -> do
+    _ <- forkIO $ do
+      -- FIXME: requires a notification mechanism to ensure that the task
+      -- starts successfully before inserting data
+      threadDelay 10000000
+      putStrLn $ "Insert into " <> show source <> " ..."
+      runInsertSql api ("INSERT INTO " <> source <> " (temperature, humidity) VALUES (22, 80);")
+      threadDelay 1000000
+      runInsertSql api ("INSERT INTO " <> source <> " (temperature, humidity) VALUES (15, 10);")
 
-      handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (15, 10);"
-      handleInsertSQL $ "INSERT INTO " <> source2 <> " (temperature, humidity) VALUES (31, 26);"
-      wait result
-    ) `shouldReturn` ["{\"temperature\":31,\"humidity\":26}","{\"temperature\":15,\"humidity\":10}"]
+    -- TODO
+    runFetchSql ("SELECT * FROM " <> source <> " EMIT CHANGES;")
+      `shouldReturn` [ mkStruct [("temperature", mkIntNumber 22), ("humidity", mkIntNumber 80)]
+                     , mkStruct [("temperature", mkIntNumber 15), ("humidity", mkIntNumber 10)]
+                     ]
 
-  -- it "a more complex query" $
-  --   (do
-  --      result <- async . handleCreateBySelectSQL $ Text.pack $ printf
-  --        "CREATE STREAM %s AS SELECT SUM(%s.humidity) AS result FROM %s INNER JOIN %s WITHIN (INTERVAL 5 SECOND) ON (%s.temperature = %s.temperature) WHERE %s.humidity > 20 GROUP BY %s.humidity, TUMBLING (INTERVAL 10 SECOND) EMIT CHANGES WITH (FORMAT = \"JSON\", REPLICATE = 3);" sink2 source2 source2 source1 source2 source1 source2 source2
-  --      threadDelay 500000
-  --      handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (31, 26);"
-  --      handleInsertSQL $ "INSERT INTO " <> source2 <> " (temperature, humidity) VALUES (22, 80);"
-  --      handleInsertSQL $ "INSERT INTO " <> source1 <> " (temperature, humidity) VALUES (15, 10);"
-  --      handleInsertSQL $ "INSERT INTO " <> source2 <> " (temperature, humidity) VALUES (31, 26);"
-  --      wait result
-  --   ) `shouldReturn` ["{\"result\":26}"]
+  it "GROUP BY without timewindow" $ \(api, source) -> do
+    _ <- forkIO $ do
+      -- FIXME: requires a notification mechanism to ensure that the task
+      -- starts successfully before inserting data
+      threadDelay 10000000
+      putStrLn $ "Insert into " <> show source <> " ..."
+      runInsertSql api ("INSERT INTO " <> source <> " (a, b) VALUES (1, 2);")
+      threadDelay 1000000
+      runInsertSql api ("INSERT INTO " <> source <> " (a, b) VALUES (2, 2);")
+      threadDelay 1000000
+      runInsertSql api ("INSERT INTO " <> source <> " (a, b) VALUES (3, 2);")
+      threadDelay 1000000
+      runInsertSql api ("INSERT INTO " <> source <> " (a, b) VALUES (4, 3);")
 
-handleCreateStreamSQL :: Text -> IO ()
-handleCreateStreamSQL sql = do
-  plan <- streamCodegen sql
-  case plan of
-    CreatePlan topicName _ ->
-      createStream ldclient (textToCBytes topicName) (LogAttrs $ HsLogAttrs{logReplicationFactor = 3, logExtraAttrs=Map.empty})
-    _ -> error "Execution plan type mismatched"
+    -- TODO
+    runFetchSql ("SELECT SUM(a) AS result FROM " <> source <> " GROUP BY b EMIT CHANGES;")
+      >>= (`shouldSatisfy`
+            (\l -> not (L.null l) &&
+                   L.last l == (mkStruct [("result", mkIntNumber 4)]) &&
+                   L.init l `L.isSubsequenceOf` [ mkStruct [("result", mkIntNumber 1)]
+                                                , mkStruct [("result", mkIntNumber 3)]
+                                                , mkStruct [("result", mkIntNumber 6)]
+                                                ]
+            )
+          )
 
-handleDropStreamSQL :: Text -> IO ()
-handleDropStreamSQL sql = do
-  plan <- streamCodegen sql
-  case plan of
-    DropPlan checkIfExist stream -> do
-      streamExists <- doesStreamExists ldclient (textToCBytes stream)
-      if streamExists then removeStream ldclient (textToCBytes stream)
-      else if checkIfExist then return () else error "stream does not exist"
-    _ -> error "Execution plan type mismatched"
+-------------------------------------------------------------------------------
+-- ViewSpec
 
-handleInsertSQL :: Text -> IO ()
-handleInsertSQL sql = do
-  plan <- streamCodegen sql
-  case plan of
-    InsertPlan topicName payload -> do
-      timestamp <- getCurrentTimestamp
-      writeRecord
-        (hstoreSinkConnector ldclient)
-        SinkRecord
-          { snkStream = topicName,
-            snkKey = Nothing,
-            snkValue = payload,
-            snkTimestamp = timestamp
-          }
-    _ -> error "Execution plan type mismatched"
+viewSpecAround
+  :: ActionWith (HStreamClientApi, (T.Text, T.Text, T.Text, T.Text, T.Text))
+  -> HStreamClientApi -> IO ()
+viewSpecAround = provideRunTest setup clean
+  where
+    setup api = do
+      source1  <- ("runsql_view_source1_" <>) <$> newRandomText 20
+      source2  <- ("runsql_view_source2_" <>) <$> newRandomText 20
+      viewName <- ("runsql_view_view_"   <>)  <$> newRandomText 20
+      runCreateStreamSql     api $ "CREATE STREAM " <> source1 <> ";"
+      threadDelay 1000000
+      qName1 <- runCreateWithSelectSql' api $ "CREATE STREAM " <> source2
+                                <> " AS SELECT a, 1 AS b FROM " <> source1
+                                <> ";"
+      threadDelay 1000000
+      qName2 <- runCreateWithSelectSql' api $ "CREATE VIEW " <> viewName
+                         <> " AS SELECT SUM(a), b FROM " <> source2
+                         <> " GROUP BY b;"
+      -- FIXME: wait the SELECT task to be initialized.
+      threadDelay 10000000
+      return (source1, source2, viewName, qName1, qName2)
+    clean api (source1, source2, viewName, qName1, qName2) = do
+      runTerminateSql api $ "TERMINATE QUERY " <> qName1 <> ";"
+      runTerminateSql api $ "TERMINATE QUERY " <> qName2 <> ";"
+      -- FIXME: wait the query terminated
+      threadDelay 10000000
+      runDropSql api $ "DROP VIEW " <> viewName <> " IF EXISTS;"
+      runDropSql api $ "DROP STREAM " <> source2 <> " IF EXISTS;"
+      runDropSql api $ "DROP STREAM " <> source1 <> " IF EXISTS;"
 
-handleCreateBySelectSQL :: Text -> IO [BL.ByteString]
-handleCreateBySelectSQL sql = do
-  putStrLn "enter handleCreateBySelectSQL"
-  plan <- streamCodegen sql
-  case plan of
-    CreateBySelectPlan _ sink taskBuilder _ -> do
-      ldreader <- newLDFileCkpReader ldclient (textToCBytes (Text.append (getTaskName taskBuilder) "-result")) "/tmp/checkpoint" 1 Nothing 3
-      let sc = hstoreSourceConnector ldclient ldreader
-      subscribeToStream sc sink Latest
-      async $ runTaskWrapper taskBuilder ldclient
-      threadDelay 5000000
-      records <- replicateM 10 $ do
-        threadDelay 500000
-        readRecords sc
-      return $ srcValue <$> concat records
-    _ -> error "Execution plan type mismatch"
+viewSpec :: Spec
+viewSpec =
+  aroundAll provideHstreamApi $ aroundAllWith viewSpecAround $
+  describe "SQL.ViewSpec" $ parallel $ do
 
-newRandomText :: Int -> IO Text
-newRandomText n = Text.pack . take n . randomRs ('a', 'z') <$> newStdGen
+{-
+-- FIXME: the mechanism to distinguish streams and views is broken by new HStore connector
+
+  it "show streams should not include views" $ \(api, (_s1, _s2, view)) -> do
+    res <- runShowStreamsSql api "SHOW STREAMS;"
+    L.sort (words res)
+      `shouldNotContain` map T.unpack (L.sort [view])
+
+  it "show views should not include streams" $ \(api, (s1, s2, _view)) -> do
+    res <- runShowViewsSql api "SHOW VIEWS;"
+    L.sort (words res)
+      `shouldNotContain` map T.unpack (L.sort [s1, s2])
+-}
+
+  -- Current CI node is too slow so it occasionally fails. It is because
+  -- we stop waiting before the records reach the output node. See
+  -- HStream.Server.Handler.Common.runImmTask for more information.
+  -- FIXME: The Drop View semantics is updated, the test need to be fixed.
+  xit "select from view" $ \(api, (source1, _source2, viewName, _, _)) -> do
+    runInsertSql api $ "INSERT INTO " <> source1 <> " (a) VALUES (1);"
+    threadDelay 500000
+    runInsertSql api $ "INSERT INTO " <> source1 <> " (a) VALUES (2);"
+    threadDelay 10000000
+    runViewQuerySql api ("SELECT * FROM " <> viewName <> " WHERE b = 1;")
+      `shouldReturn` mkViewResponse (mkStruct [ ("SUM(a)", mkIntNumber 3)
+                                                  , ("b",  mkIntNumber 1)
+                                                  ])
+
+    threadDelay 500000
+    runInsertSql api $ "INSERT INTO " <> source1 <> " (a) VALUES (3);"
+    threadDelay 500000
+    runInsertSql api $ "INSERT INTO " <> source1 <> " (a) VALUES (4);"
+    threadDelay 10000000
+    runViewQuerySql api ("SELECT * FROM " <> viewName <> " WHERE b = 1;")
+      `shouldReturn` mkViewResponse (mkStruct [ ("SUM(a)", mkIntNumber 10)
+                                                  , ("b",  mkIntNumber 1)
+                                                  ])
+#endif

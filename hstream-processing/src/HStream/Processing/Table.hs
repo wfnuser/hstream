@@ -13,18 +13,18 @@ import           HStream.Processing.Stream.Internal
 import           RIO
 import qualified RIO.Text                           as T
 
-data Table k v = Table
-  { tableKeySerde :: Maybe (Serde k),
-    tableValueSerde :: Maybe (Serde v),
-    tableProcessorName :: T.Text,
-    tableStoreName :: T.Text,
+data Table k v s = Table
+  { tableKeySerde        :: Maybe (Serde k s),
+    tableValueSerde      :: Maybe (Serde v s),
+    tableProcessorName   :: T.Text,
+    tableStoreName       :: T.Text,
     tableInternalBuilder :: InternalStreamBuilder
   }
 
 toStream ::
   (Typeable k, Typeable v) =>
-  Table k v ->
-  IO (Stream k v)
+  Table k v s ->
+  IO (Stream k v s)
 toStream Table {..} =
   return $
     mkStream tableKeySerde tableValueSerde tableProcessorName tableInternalBuilder

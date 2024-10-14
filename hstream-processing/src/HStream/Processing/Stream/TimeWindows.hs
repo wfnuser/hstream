@@ -1,7 +1,10 @@
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE StrictData        #-}
+{-# LANGUAGE DeriveAnyClass     #-}
+{-# LANGUAGE DeriveGeneric      #-}
+{-# LANGUAGE NoImplicitPrelude  #-}
+{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE StrictData         #-}
 
 module HStream.Processing.Stream.TimeWindows
   ( TimeWindow (..),
@@ -17,15 +20,15 @@ module HStream.Processing.Stream.TimeWindows
   )
 where
 
-import           Data.Binary.Get
-import qualified Data.ByteString.Builder     as BB
+import           Data.Aeson
+import           Data.Default
 import           HStream.Processing.Encoding
 import           RIO
 
 data TimeWindows = TimeWindows
-  { twSizeMs :: Int64,
+  { twSizeMs    :: Int64,
     twAdvanceMs :: Int64,
-    twGraceMs :: Int64
+    twGraceMs   :: Int64
   }
 
 mkTumblingWindow :: Int64 -> TimeWindows
@@ -46,8 +49,9 @@ mkHoppingWindow windowSize stepSize =
 
 data TimeWindow = TimeWindow
   { tWindowStart :: Int64,
-    tWindowEnd :: Int64
+    tWindowEnd   :: Int64
   }
+  deriving (Eq, Ord, Generic, FromJSON, ToJSON, Default)
 
 instance Show TimeWindow where
   show TimeWindow {..} = "[" ++ show tWindowStart ++ ", " ++ show tWindowEnd ++ "]"
@@ -60,36 +64,57 @@ mkTimeWindow startTs endTs =
     }
 
 data TimeWindowKey k = TimeWindowKey
-  { twkKey :: k,
+  { twkKey    :: k,
     twkWindow :: TimeWindow
   }
+  deriving (Generic, Default)
 
 instance (Show k) => Show (TimeWindowKey k) where
   show TimeWindowKey {..} = "key: " ++ show twkKey ++ ", window: " ++ show twkWindow
 
-timeWindowKeySerializer :: Serializer k -> Serializer (TimeWindowKey k)
-timeWindowKeySerializer kSerializer = Serializer $ \TimeWindowKey {..} ->
-  let keyBytes = runSer kSerializer twkKey
-      bytesBuilder = BB.int64BE (tWindowStart twkWindow) <> BB.lazyByteString keyBytes
-   in BB.toLazyByteString bytesBuilder
+deriving instance (Eq k) => Eq (TimeWindowKey k)
+deriving instance (Ord k) => Ord (TimeWindowKey k)
+deriving instance (FromJSON k) => FromJSON (TimeWindowKey k)
+deriving instance (FromJSON k) => FromJSONKey (TimeWindowKey k)
+deriving instance (ToJSON k) => ToJSON (TimeWindowKey k)
+deriving instance (ToJSON k) => ToJSONKey (TimeWindowKey k)
 
-timeWindowKeyDeserializer :: Deserializer k -> Int64 -> Deserializer (TimeWindowKey k)
-timeWindowKeyDeserializer kDeserializer windowSize = Deserializer $ runGet decodeWindowKey
-  where
-    decodeWindowKey = do
-      startTs <- getInt64be
-      keyBytes <- getRemainingLazyByteString
-      return
-        TimeWindowKey
-          { twkKey = runDeser kDeserializer keyBytes,
-            twkWindow = mkTimeWindow startTs (startTs + windowSize)
-          }
+timeWindowKeySerializer ::
+  (Serialized s) =>
+  Serializer k s ->
+  Serializer TimeWindow s ->
+  Serializer (TimeWindowKey k) s
+timeWindowKeySerializer kSerializer winSerializer = Serializer $ \TimeWindowKey {..} ->
+  let keySer = runSer kSerializer twkKey
+      winSer = runSer winSerializer twkWindow
+   in compose (winSer, keySer)
 
-timeWindowKeySerde :: Serde k -> Int64 -> Serde (TimeWindowKey k)
-timeWindowKeySerde kSerde windowSize =
+timeWindowKeyDeserializer ::
+  (Serialized s) =>
+  Deserializer k s ->
+  Deserializer TimeWindow s ->
+  Int64 ->
+  Deserializer (TimeWindowKey k) s
+timeWindowKeyDeserializer kDeserializer winDeserializer windowSize = Deserializer $ \s ->
+  let (winSer, keySer) = separate s
+      win = runDeser winDeserializer winSer
+      key = runDeser kDeserializer keySer
+      winStart = tWindowStart win
+   in TimeWindowKey
+        { twkKey = key,
+          twkWindow = win {tWindowStart = winStart, tWindowEnd = winStart + windowSize}
+        }
+
+timeWindowKeySerde ::
+  (Serialized s) =>
+  Serde k s ->
+  Serde TimeWindow s ->
+  Int64 ->
+  Serde (TimeWindowKey k) s
+timeWindowKeySerde kSerde winSerde windowSize =
   Serde
-    { serializer = timeWindowKeySerializer $ serializer kSerde,
-      deserializer = timeWindowKeyDeserializer (deserializer kSerde) windowSize
+    { serializer = timeWindowKeySerializer (serializer kSerde) (serializer winSerde),
+      deserializer = timeWindowKeyDeserializer (deserializer kSerde) (deserializer winSerde) windowSize
     }
 
 mkTimeWindowKey ::

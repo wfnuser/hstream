@@ -21,7 +21,7 @@ import           System.Random
 
 data R = R
   { temperature :: Int,
-    humidity :: Int
+    humidity    :: Int
   }
   deriving (Generic, Show, Typeable)
 
@@ -39,14 +39,14 @@ main = do
   let sourceConfig =
         SourceConfig
           { sourceName = "source",
-            sourceTopicName = "demo-source",
+            sourceStreamName = "demo-source",
             keyDeserializer = voidDeserializer,
             valueDeserializer = Deserializer (\s -> (fromJust $ decode s) :: R)
           }
   let sinkConfig =
         SinkConfig
           { sinkName = "sink",
-            sinkTopicName = "demo-sink",
+            sinkStreamName = "demo-sink",
             keySerializer = voidSerializer,
             valueSerializer = Serializer (encode :: R -> BL.ByteString)
           }

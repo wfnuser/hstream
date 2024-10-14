@@ -22,7 +22,7 @@ import           System.Random
 
 data R = R
   { temperature :: Int,
-    humidity :: Int
+    humidity    :: Int
   }
   deriving (Generic, Show, Typeable)
 
@@ -40,9 +40,9 @@ instance ToJSON R1
 instance FromJSON R1
 
 data R2 = R2
-  { r2Location :: TL.Text,
+  { r2Location    :: TL.Text,
     r2Temperature :: Int,
-    r2Humidity :: Int
+    r2Humidity    :: Int
   }
   deriving (Generic, Show, Typeable)
 
@@ -62,43 +62,43 @@ main = do
           { serializer = Serializer TLE.encodeUtf8,
             deserializer = Deserializer TLE.decodeUtf8
           } ::
-          Serde TL.Text
+          Serde TL.Text BL.ByteString
   let rSerde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R
+          Serde R BL.ByteString
   let r1Serde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R1
+          Serde R1 BL.ByteString
   let r2Serde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R2
-  let streamTopicName = "stream-source"
-  let tableTopicName = "table-source"
-  let sinkTopicName = "demo-sink"
+          Serde R2 BL.ByteString
+  let streamStreamName = "stream-source"
+  let tableStreamName = "table-source"
+  let sinkStreamName = "demo-sink"
   let streamSourceConfig1 =
         HS.StreamSourceConfig
-          { sscTopicName = streamTopicName,
+          { sscStreamName = streamStreamName,
             sscKeySerde = textSerde,
             sscValueSerde = rSerde
           }
   let streamSourceConfig2 =
         HS.StreamSourceConfig
-          { sscTopicName = tableTopicName,
+          { sscStreamName = tableStreamName,
             sscKeySerde = textSerde,
             sscValueSerde = r1Serde
           }
   let streamSinkConfig =
         HS.StreamSinkConfig
-          { sicTopicName = sinkTopicName,
+          { sicStreamName = sinkStreamName,
             sicKeySerde = textSerde,
             sicValueSerde = r2Serde
           }
@@ -117,7 +117,7 @@ main = do
         writeRecord
           sinkConnector
           SinkRecord
-            { snkStream = tableTopicName,
+            { snkStream = tableStreamName,
               snkKey = Just $ TLE.encodeUtf8 $ TL.pack $ show i,
               snkValue = encode $ R1 {location = TL.append "location-" $ TL.pack (show i)},
               snkTimestamp = -1
@@ -132,7 +132,7 @@ main = do
         writeRecord
           sinkConnector
           SinkRecord
-            { snkStream = streamTopicName,
+            { snkStream = streamStreamName,
               snkKey = mmKey,
               snkValue = mmValue,
               snkTimestamp = mmTimestamp

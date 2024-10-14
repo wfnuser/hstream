@@ -1,45 +1,83 @@
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards   #-}
-{-# LANGUAGE StrictData        #-}
+{-# LANGUAGE CPP                 #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StrictData          #-}
 
 module HStream.Processing.Processor
-  ( buildTask,
+  ( build,
+    buildTask,
+    taskBuilderWithName,
     addSource,
     addProcessor,
     addSink,
     addStateStore,
     runTask,
+    runImmTask,
     forward,
     getKVStateStore,
     getSessionStateStore,
     getTimestampedKVStateStore,
     getTaskName,
+    Materialized (..),
     Record (..),
     Processor (..),
     SourceConfig (..),
     SinkConfig (..),
-    TaskBuilder,
+    TaskBuilder (..),
+    TaskTopologyConfig (..),
+    Task (..),
+
+    ChangeLogger (..),
+    StateStoreChangelog (..),
+    applyStateStoreChangelog,
+    applyStateStoreSnapshot
   )
 where
 
-import           Control.Exception                     (throw)
+import           Control.Concurrent
+import           Control.Exception                      (throw)
+import qualified Data.Aeson                             as Aeson
 import           Data.Maybe
 import           Data.Typeable
+import qualified Prelude
+import qualified RIO
+import           RIO
+import qualified RIO.ByteString.Lazy                    as BL
+import qualified RIO.HashMap                            as HM
+import           RIO.HashMap.Partial                    as HM'
+import qualified RIO.HashSet                            as HS
+import qualified RIO.List                               as L
+import qualified RIO.Map                                as Map
+import qualified RIO.Text                               as T
+
+import qualified HStream.Exception                      as HE
+import qualified HStream.Logger                         as Log
 import           HStream.Processing.Connector
 import           HStream.Processing.Encoding
-import           HStream.Processing.Error              (HStreamError (..))
+import           HStream.Processing.Error               (HStreamProcessingError (..))
+import           HStream.Processing.Processor.ChangeLog
 import           HStream.Processing.Processor.Internal
+import           HStream.Processing.Processor.Snapshot
 import           HStream.Processing.Store
 import           HStream.Processing.Type
 import           HStream.Processing.Util
-import           RIO
-import qualified RIO.ByteString.Lazy                   as BL
-import qualified RIO.HashMap                           as HM
-import           RIO.HashMap.Partial                   as HM'
-import qualified RIO.HashSet                           as HS
-import qualified RIO.List                              as L
-import qualified RIO.Text                              as T
+import qualified HStream.Server.HStreamApi              as API
+import           HStream.Stats                          (StatsHolder,
+                                                         query_stat_add_total_execute_errors,
+                                                         query_stat_add_total_input_records,
+                                                         query_stat_add_total_output_records)
+import           HStream.Utils                          (textToCBytes)
+
+data Materialized k v s = Materialized
+  { mKeySerde   :: Serde k s,
+    mValueSerde :: Serde v s,
+    -- mStateStore :: StateStore BL.ByteString BL.ByteString
+    mStateStore :: StateStore k v
+  }
 
 build :: TaskBuilder -> Task
 build tp@TaskTopologyConfig {..} =
@@ -85,23 +123,64 @@ buildTask taskName =
     { ttcName = taskName
     }
 
-runTask ::
-  SourceConnector ->
-  SinkConnector ->
-  TaskBuilder ->
-  IO ()
-runTask SourceConnector {..} sinkConnector taskBuilder@TaskTopologyConfig {..} = do
+taskBuilderWithName ::
+  TaskBuilder -> T.Text -> TaskBuilder
+taskBuilderWithName builder taskName =
+  builder
+    { ttcName = taskName
+    }
+
+-- | Run a task. This function will block the current thread.
+--   And this function will throw an exception if any (unrecoverable)
+--   error occurs, see the comments at 'go' following.
+runTask
+  :: (ChangeLogger h1, Snapshotter h2)
+  => StatsHolder
+  -> SourceConnectorWithoutCkp
+  -> SinkConnector
+  -> TaskBuilder
+  -> Text  -- ^ queryId, use for stats gathering
+  -> h1
+  -> h2
+  -> (Task -> IO ())
+#ifdef HStreamEnableSchema
+  -> (T.Text -> IO (Maybe schema))
+  -> (schema -> BL.ByteString -> Maybe BL.ByteString) -- FIXME: schema actually only belongs to value
+  -> (schema -> BL.ByteString -> Maybe BL.ByteString)
+#else
+  -> (T.Text -> BL.ByteString -> Maybe BL.ByteString)
+  -> (T.Text -> BL.ByteString -> Maybe BL.ByteString)
+#endif
+  -> (BL.ByteString -> Maybe BL.ByteString)
+  -> (BL.ByteString -> Maybe BL.ByteString)
+  -> IO ()
+runTask statsHolder
+        SourceConnectorWithoutCkp {..}
+        sinkConnector
+        taskBuilder@TaskTopologyConfig {..}
+        qid
+        changeLogger
+        snapshotter
+        doSnapshot
+#ifdef HStreamEnableSchema
+        getSchema
+#endif
+        transKSrc
+        transVSrc
+        transKSnk
+        transVSnk = do
   -- build and add internalSinkProcessor
   let sinkProcessors =
         HM.map
-          (buildInternalSinkProcessor sinkConnector)
+          ( buildInternalSinkProcessor
+              sinkConnector
+              transKSnk
+              transVSnk
+          )
           sinkCfgs
-
   let newTaskBuilder =
         HM.foldlWithKey'
-          ( \a k v ->
-              a <> addProcessor k v [T.append k serializerNameSuffix]
-          )
+          (\a k v -> a <> addProcessor k v [T.append k serializerNameSuffix])
           taskBuilder
           sinkProcessors
 
@@ -112,22 +191,228 @@ runTask SourceConnector {..} sinkConnector taskBuilder@TaskTopologyConfig {..} =
   let sourceStreamNames = HM.keys taskSourceConfig
   logOptions <- logOptionsHandle stderr True
   withLogFunc logOptions $ \lf -> do
-    ctx <- buildTaskContext task lf
-    forM_ sourceStreamNames (`subscribeToStream` Latest)
-    forever $
-      runRIO ctx $
-        do
-          logDebug "start iteration..."
-          sourceRecords <- liftIO readRecords
-          logDebug $ "polled " <> display (length sourceRecords) <> " records"
-          forM_
-            sourceRecords
-            ( \SourceRecord {..} -> do
-                let acSourceName = iSourceName (taskSourceConfig HM'.! srcStream)
-                let (sourceEProcessor, _) = taskTopologyForward HM'.! acSourceName
-                liftIO $ updateTimestampInTaskContext ctx srcTimestamp
-                runEP sourceEProcessor (mkERecord Record {recordKey = srcKey, recordValue = srcValue, recordTimestamp = srcTimestamp})
-            )
+    ctx <- buildTaskContext task lf changeLogger snapshotter
+    forM_ sourceStreamNames $ \stream -> do
+      isSubscribedToStreamWithoutCkp stream >>= \case
+        True  -> return ()
+        False -> subscribeToStreamWithoutCkp stream API.SpecialOffsetLATEST
+
+    chan <- newTChanIO
+
+    -- Note: Start many threads of 'f' and one thread of 'g':
+    -- 1. 'f' is responsible for reading records from source streams and
+    --    writing them to the channel.
+    -- 2. 'g' is responsible for reading records from the channel and doing
+    --    the actual processing
+
+    -- [important] we use 'forConcurrently_' to ensure other threads are
+    --             cancelled when one of them throws an exception.
+    -- [important] we use 'waitEitherCancel' to ensure both threads are
+    --             cleaned up when one of them throws an exception.
+    --             The 'finally' here is just for setting 'connectorClosed'.
+    --             Otherwise, the consumers will not exit and the
+    --             subscriptions will not be deleted. We do not do any
+    --             error handling here and re-throw it to the top level
+    --             (by 'finally').
+
+
+    -- 'forConcurrently_' here: important! See the comment above.
+    withAsync (forConcurrently_ sourceStreamNames (f chan connectorClosed)) $ \a ->
+      withAsync (g task ctx chan) $ \b ->
+        -- 'finally' here: important! See the comment above.
+        void (waitEitherCancel a b) `finally` do
+          atomically $ writeTVar connectorClosed True
+          forM_ sourceStreamNames (\stream -> do
+            isSubscribedToStreamWithoutCkp stream >>= \case
+              True  -> unSubscribeToStreamWithoutCkp stream
+              False -> return ()  )
+  where
+    f :: TChan ([SourceRecord], MVar ()) -> TVar Bool -> T.Text -> IO ()
+    f chan consumerClosed sourceStreamName = do
+#ifdef HStreamEnableSchema
+      schema <- getSchema sourceStreamName <&> fromJust
+      withReadRecordsWithoutCkp sourceStreamName (transKSrc schema) (transVSrc schema) consumerClosed $ \sourceRecords -> do
+#else
+      withReadRecordsWithoutCkp sourceStreamName (transKSrc sourceStreamName) (transVSrc sourceStreamName) consumerClosed $ \sourceRecords -> do
+#endif
+        mvar <- RIO.newEmptyMVar
+        let callback  = do
+              query_stat_add_total_input_records statsHolder (textToCBytes qid) (fromIntegral . length $ sourceRecords)
+              atomically $ writeTChan chan (sourceRecords, mvar)
+            beforeAck = RIO.takeMVar mvar
+        return (callback,beforeAck)
+
+    g :: Task -> TaskContext -> TChan ([SourceRecord], MVar ()) -> IO ()
+    g task@Task{..} ctx chan = do
+      timer <- newIORef False
+      -- Start two threads here. One is used to set the timer of snapshotting
+      -- and the other is used to do the **snapshotting** and **processing**.
+
+      -- [important] we use 'waitEitherCancel' to ensure both threads are
+      --             cancelled when one of them throws an exception.
+      withAsync (forever $ do
+        Control.Concurrent.threadDelay $ 10 * 1000 * 1000
+        atomicWriteIORef timer True) $ \a -> withAsync (forever $ do
+          readIORef timer >>= \case
+            False -> go
+            True  -> do
+              doSnapshot task
+              atomicWriteIORef timer False) $ \b -> void (waitEitherCancel a b)
+      where
+        go = do
+          (sourceRecords, mvar) <- atomically $ readTChan chan
+          runRIO ctx $ forM_ sourceRecords $ \SourceRecord {..} -> do
+            let acSourceName = iSourceName (taskSourceConfig HM'.! srcStream)
+            let (sourceEProcessor, _) = taskTopologyForward HM'.! acSourceName
+            liftIO $ updateTimestampInTaskContext ctx srcTimestamp
+            -- [WARNING] [FIXME]
+            -- The following code means that we only consider 'StreamNotFound'
+            -- as a fatal error so we re-throw it. This causes all threads
+            -- related to this task to exit. As for other errors, we just
+            -- log them and continue.
+            -- HOWEVER, this should be re-considered. Which errors are actually
+            -- fatal?
+            catches (runEP sourceEProcessor (mkERecord Record {recordKey = srcKey, recordValue = srcValue, recordTimestamp = srcTimestamp}))
+              [ Handler $ \(err :: HE.StreamNotFound) -> do
+                liftIO $ query_stat_add_total_execute_errors statsHolder (textToCBytes qid) 1
+                -- 'throw' here: very important! Or the threads related to the
+                --               task will not be cleaned up. See above.
+                throw err
+              , Handler $ \(err :: SomeException) -> do
+                liftIO $ Log.warning $ Log.buildString' err
+                liftIO $ query_stat_add_total_execute_errors statsHolder (textToCBytes qid) 1
+                -- No 'throw' here: very important! Just omit the error and
+                --                  continue processing. See above.
+              ]
+            liftIO $ query_stat_add_total_output_records statsHolder (textToCBytes qid) 1
+          -- NOTE: tell the server that we have processed this "batch" of records
+          --       so it can mark them as acked. Here we associate a batch of
+          --       'SourceRecord' with a single ack. This granularity may be too
+          --       coarse if the batch size is large.
+          -- CAUTION: the position of the following line!!!
+          liftIO $ RIO.putMVar mvar ()
+
+runImmTask ::
+  (Ord t, Monoid t, Aeson.FromJSON t, Aeson.ToJSON t, Typeable t, ChangeLogger h1, Snapshotter h2
+#ifdef HStreamEnableSchema
+  , Show schema
+#endif
+  ) =>
+  [(T.Text, Materialized t t t)] ->
+  SinkConnector ->
+  TaskBuilder ->
+  h1 ->
+  h2 ->
+#ifdef HStreamEnableSchema
+  (T.Text -> IO (Maybe schema)) ->
+  (schema -> BL.ByteString -> Maybe BL.ByteString) -> -- FIXME: schema actually only belongs to value
+  (schema -> BL.ByteString -> Maybe BL.ByteString) ->
+#else
+  (T.Text -> BL.ByteString -> Maybe BL.ByteString) ->
+  (T.Text -> BL.ByteString -> Maybe BL.ByteString) ->
+#endif
+  (BL.ByteString -> Maybe BL.ByteString) ->
+  (BL.ByteString -> Maybe BL.ByteString) ->
+  IO ()
+runImmTask srcTups
+           sinkConnector
+           taskBuilder@TaskTopologyConfig {..}
+           changeLogger
+           snapshotter
+#ifdef HStreamEnableSchema
+           getSchema
+#endif
+           transKSrc
+           transVSrc
+           transKSnk
+           transVSnk = do
+  -- build and add internalSinkProcessor
+  let sinkProcessors =
+        HM.map
+          ( buildInternalSinkProcessor
+              sinkConnector
+              transKSnk
+              transVSnk
+          )
+          sinkCfgs
+  let newTaskBuilder =
+        HM.foldlWithKey'
+          (\a k v -> a <> addProcessor k v [T.append k serializerNameSuffix])
+          taskBuilder
+          sinkProcessors
+
+  -- build forward topology
+  let task@Task {..} = build newTaskBuilder
+
+  -- runTask
+  logOptions <- logOptionsHandle stderr True
+  withLogFunc logOptions $ \lf -> do
+    ctx <- buildTaskContext task lf changeLogger snapshotter
+
+    loop task ctx srcTups []
+  where
+    runOnePath :: Task -> TaskContext -> (T.Text, [SourceRecord]) -> IO ()
+    runOnePath Task {..} ctx (sourceStreamName, sourceRecords) = runRIO ctx $ do
+      forM_ sourceRecords $ \r@SourceRecord {..} -> do
+        let acSourceName = iSourceName (taskSourceConfig HM'.! srcStream)
+        let (sourceEProcessor, _) = taskTopologyForward HM'.! acSourceName
+        liftIO $ updateTimestampInTaskContext ctx srcTimestamp
+        e' <- try $ runEP sourceEProcessor (mkERecord Record {recordKey = srcKey, recordValue = srcValue, recordTimestamp = srcTimestamp})
+        case e' of
+          Left (e :: SomeException) -> liftIO $ Log.warning $ Log.buildString (Prelude.show e)
+          Right _ -> return ()
+    loop :: (Ord t, Monoid t, Aeson.FromJSON t, Aeson.ToJSON t, Typeable t)
+         => Task
+         -> TaskContext
+         -> [(T.Text, Materialized t t t)]
+         -> [Async ()]
+         -> IO ()
+    loop task ctx [] asyncs = return ()
+    loop task ctx [(sourceStreamName, mat)] asyncs = do
+#ifdef HStreamEnableSchema
+      schema <- getSchema sourceStreamName <&> fromJust
+      let transKSrc' = transKSrc schema
+          transVSrc' = transVSrc schema
+#else
+      let transKSrc' = transKSrc sourceStreamName
+          transVSrc' = transVSrc sourceStreamName
+#endif
+      case mStateStore mat of
+        KVStateStore ekvStore      -> do
+          kvMap <- ksDump ekvStore
+          ts <- getCurrentTimestamp -- FIXME: is this precise enough?
+          sourceRecords <- RIO.forMaybeM (Map.toList kvMap) $ \(k,v) -> do
+            case transVSrc' (Aeson.encode $ k <> v) of
+              Nothing -> return Nothing
+              Just v' -> return . Just $ SourceRecord
+                         { srcStream = sourceStreamName
+                         , srcOffset = 0
+                         , srcTimestamp = ts
+                         , srcKey = Just (Aeson.encode $ mempty `asTypeOf` k)
+                         , srcValue = v'
+                         }
+          runOnePath task ctx (sourceStreamName, sourceRecords)
+            `onException` forM_ asyncs cancel
+        SessionStateStore essStore -> do
+          tmMap <- ssDump essStore
+          sourceRecords <- (L.concat . L.concat) <$> (forM (Map.elems tmMap) $ \kmap -> do
+            forM (Map.toList kmap) $ \(k,m) -> do
+              RIO.forMaybeM (Map.toList m) $ \(ts,v) ->
+                case transVSrc' (Aeson.encode $ k <> v) of
+                  Nothing -> return Nothing
+                  Just v' -> return . Just $ SourceRecord
+                             { srcStream = sourceStreamName
+                             , srcOffset = 0
+                             , srcTimestamp = ts
+                             , srcKey = Just (Aeson.encode $ mempty `asTypeOf` k)
+                             , srcValue = v'
+                             })
+          runOnePath task ctx (sourceStreamName, sourceRecords)
+            `onException` forM_ asyncs cancel
+        TimestampedKVStateStore etskvStore -> error "impossible"
+    loop task ctx (tup : tups) asyncs = do
+      withAsync (loop task ctx [tup] asyncs) $ \a -> do
+        loop task ctx tups (asyncs ++ [a])
 
 validateTopology :: TaskTopologyConfig -> ()
 validateTopology TaskTopologyConfig {..} =
@@ -138,32 +423,32 @@ validateTopology TaskTopologyConfig {..} =
         then throw $ TaskTopologyBuildError "task build error: no valid sink config"
         else ()
 
-data SourceConfig k v = SourceConfig
-  { sourceName :: T.Text,
-    sourceTopicName :: T.Text,
-    keyDeserializer :: Maybe (Deserializer k),
-    valueDeserializer :: Deserializer v
+data SourceConfig k v s = SourceConfig
+  { sourceName        :: T.Text,
+    sourceStreamName  :: T.Text,
+    keyDeserializer   :: Maybe (Deserializer k s),
+    valueDeserializer :: Deserializer v s
   }
 
-data SinkConfig k v = SinkConfig
-  { sinkName :: T.Text,
-    sinkTopicName :: T.Text,
-    keySerializer :: Maybe (Serializer k),
-    valueSerializer :: Serializer v
+data SinkConfig k v s = SinkConfig
+  { sinkName        :: T.Text,
+    sinkStreamName  :: T.Text,
+    keySerializer   :: Maybe (Serializer k s),
+    valueSerializer :: Serializer v s
   }
 
 addSource ::
-  (Typeable k, Typeable v) =>
-  SourceConfig k v ->
+  (Typeable k, Typeable v, Typeable s) =>
+  SourceConfig k v s ->
   TaskBuilder
 addSource cfg@SourceConfig {..} =
   mempty
     { sourceCfgs =
         HM.singleton
-          sourceTopicName
+          sourceStreamName
           InternalSourceConfig
             { iSourceName = sourceName,
-              iSourceTopicName = sourceTopicName
+              iSourceStreamName = sourceStreamName
             },
       topology =
         HM.singleton
@@ -173,8 +458,8 @@ addSource cfg@SourceConfig {..} =
 
 buildSourceProcessor ::
   (Typeable k, Typeable v) =>
-  SourceConfig k v ->
-  Processor BL.ByteString BL.ByteString
+  SourceConfig k v s ->
+  Processor s s -- BL.ByteString BL.ByteString
 buildSourceProcessor SourceConfig {..} = Processor $ \r@Record {..} -> do
   -- deserialize and forward
   logDebug "enter source processor"
@@ -201,8 +486,8 @@ addProcessor name processor parentNames =
     }
 
 buildSinkProcessor ::
-  (Typeable k, Typeable v) =>
-  SinkConfig k v ->
+  (Typeable k, Typeable v, Typeable s) =>
+  SinkConfig k v s ->
   Processor k v
 buildSinkProcessor SinkConfig {..} = Processor $ \r@Record {..} -> do
   logDebug $ "enter sink serializer processor for stream " <> display sinkName
@@ -210,14 +495,14 @@ buildSinkProcessor SinkConfig {..} = Processor $ \r@Record {..} -> do
   let rv = runSer valueSerializer recordValue
   forward r {recordKey = rk, recordValue = rv}
 
--- liftIO $ writeRecord SinkRecord {snkStream = sinkTopicName, snkKey = rk, snkValue = rv, snkTimestamp = recordTimestamp}
+-- liftIO $ writeRecord SinkRecord {snkStream = sinkStreamName, snkKey = rk, snkValue = rv, snkTimestamp = recordTimestamp}
 
 serializerNameSuffix :: T.Text
 serializerNameSuffix = "-SERIALIZER"
 
 addSink ::
-  (Typeable k, Typeable v) =>
-  SinkConfig k v ->
+  (Typeable k, Typeable v, Typeable s) =>
+  SinkConfig k v s ->
   [T.Text] ->
   TaskBuilder
 addSink cfg@SinkConfig {..} parentNames =
@@ -231,21 +516,25 @@ addSink cfg@SinkConfig {..} parentNames =
           sinkName
           InternalSinkConfig
             { iSinkName = sinkName,
-              iSinkTopicName = sinkTopicName
+              iSinkStreamName = sinkStreamName
             }
     }
 
 buildInternalSinkProcessor ::
   SinkConnector ->
+  (BL.ByteString -> Maybe BL.ByteString) ->
+  (BL.ByteString -> Maybe BL.ByteString) ->
   InternalSinkConfig ->
   Processor BL.ByteString BL.ByteString
-buildInternalSinkProcessor sinkConnector InternalSinkConfig {..} = Processor $ \Record {..} -> do
+buildInternalSinkProcessor sinkConnector transK transV InternalSinkConfig {..} = Processor $ \Record {..} -> do
   ts <- liftIO getCurrentTimestamp
   liftIO $
     writeRecord
       sinkConnector
+      transK
+      transV
       SinkRecord
-        { snkStream = iSinkTopicName,
+        { snkStream = iSinkStreamName,
           snkKey = recordKey,
           snkValue = recordValue,
           snkTimestamp = ts

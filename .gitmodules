@@ -1,6 +1,24 @@
 [submodule "external/gRPC-haskell"]
 	path = external/gRPC-haskell
-	url = git@github.com:hstreamdb/gRPC-haskell.git
+	url = https://github.com/hstreamdb/gRPC-haskell.git
 [submodule "external/hsthrift"]
 	path = external/hsthrift
-	url = git@github.com:hstreamdb/hsthrift.git
+	url = https://github.com/hstreamdb/hsthrift.git
+[submodule "external/proto3-suite"]
+	path = external/proto3-suite
+	url = https://github.com/hstreamdb/proto3-suite.git
+[submodule "external/proto3-wire"]
+	path = external/proto3-wire
+	url = https://github.com/hstreamdb/proto3-wire.git
+[submodule "external/protocol"]
+	path = external/protocol
+	url = https://github.com/hstreamdb/protocol.git
+[submodule "external/hs-grpc"]
+	path = external/hs-grpc
+	url = https://github.com/4eUeP/hs-grpc.git
+[submodule "external/haskell-rocksdb-bindings"]
+	path = external/haskell-rocksdb-bindings
+	url = https://github.com/hstreamdb/haskell-rocksdb-bindings.git
+[submodule "external/gsasl-hs"]
+	path = external/gsasl-hs
+	url = https://github.com/Commelina/gsasl-hs.git

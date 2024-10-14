@@ -3,25 +3,104 @@ name: Publish
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   IMAGE_NAME: "hstreamdb/hstream"
+  BUILDER_IMAGE_NAME: "hstreamdb/hstream-builder"
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - hs_image: "hstreamdb/haskell:9.4"
+            ld_image: "hstreamdb/logdevice:latest"
+            tag: "${GITHUB_REF#refs/*/}"
+          - hs_image: "hstreamdb/haskell:rqlite_9.4"
+            ld_image: "hstreamdb/logdevice:rqlite"
+            tag: "rqlite_${GITHUB_REF#refs/*/}"
     steps:
-      - uses: actions/checkout@v2
+      - name: Free disk space
+        run: |
+          echo "Before..."
+          df -h
+          sudo rm -rf \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            "/usr/local/share/boost" \
+            /usr/lib/jvm || true
+          echo "After..."
+          df -h
+
+      - run: |
+          echo "${{ matrix.tag }}"
+      - uses: actions/checkout@v4
         with:
-          submodules: 'recursive'
+          submodules: "recursive"
+          # We need tags. Also see: https://github.com/actions/checkout/issues/701
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get version info
+        run: |
+          echo "LATEST_TAG=$(git describe --tag --abbrev=0)" >> $GITHUB_ENV
+          echo "CURRENT_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+      - name: Docker build
+        run: |
+          docker build . -f docker/Dockerfile \
+            --build-arg HS_IMAGE=${{ matrix.hs_image }} \
+            --build-arg LD_IMAGE=${{ matrix.ld_image }} \
+            --build-arg HSTREAM_VERSION=${{ env.LATEST_TAG }} \
+            --build-arg HSTREAM_VERSION_COMMIT=${{ env.CURRENT_COMMIT }} \
+            --build-arg BUILD_CACHE="no_cache" \
+            -t ${IMAGE_NAME}:${{ matrix.tag }}
 
       - name: Push image to dockerhub
-        run: |
-          echo "Login dockerhub..."
-          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login --username "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        run: docker push ${IMAGE_NAME}:${{ matrix.tag }}
 
-          TAG=${GITHUB_REF#refs/*/}
-          echo "Build & Push ${IMAGE_NAME}:${TAG}..."
-          docker build . -t ${IMAGE_NAME}:${TAG}
-          docker push ${IMAGE_NAME}:${TAG}
+      - name: Build and push builder
+        run: |
+          docker build . -f docker/Dockerfile \
+            --build-arg HS_IMAGE=${{ matrix.hs_image }} \
+            --build-arg LD_IMAGE=${{ matrix.ld_image }} \
+            --build-arg HSTREAM_VERSION=${{ env.LATEST_TAG }} \
+            --build-arg HSTREAM_VERSION_COMMIT=${{ env.CURRENT_COMMIT }} \
+            --build-arg BUILD_CACHE="no_cache" \
+            --target builder \
+            -t ${BUILDER_IMAGE_NAME}:latest
+          # For cache
+          docker push ${BUILDER_IMAGE_NAME}:latest
+
+  trigger:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Trigger integration-tests ci
+        run: |
+          URL=https://api.github.com/repos/hstreamdb/integration-tests/dispatches
+          curl \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.PERSONAL_ACCESS_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            $URL \
+              --data "{\"event_type\": \"image_updated\", \"client_payload\": { \"tag\": \"$TAG\", \"commit_sha\": \"$GITHUB_SHA\" }}"
+
+      - name: Trigger jepsen-tests ci
+        run: |
+          URL=https://api.github.com/repos/hstreamdb/jepsen.hstream/dispatches
+          curl \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.PERSONAL_ACCESS_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            $URL \
+              --data "{\"event_type\": \"image_updated\", \"client_payload\": { \"tag\": \"$TAG\", \"commit_sha\": \"$GITHUB_SHA\" }}"

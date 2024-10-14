@@ -1,0 +1,205 @@
+cabal-version:      2.4
+name:               diff-flow
+version:            0.1.0.0
+synopsis:           Differential stream processing library.
+description:
+  Please refer to the README on Github at
+  <https://github.com/hstreamdb/diff-flow#readme>
+
+license:            BSD-3-Clause
+license-file:       LICENSE
+copyright:          Copyright (c) 2022 Commelina
+author:             Commelina <maosics@gmail.com>
+maintainer:         Commelina <maosics@gmail.com>
+tested-with:        GHC ==8.10.7
+category:           Streaming
+homepage:           https://github.com/hstreamdb/diff-flow
+bug-reports:        https://github.com/hstreamdb/diff-flow/issues
+build-type:         Simple
+extra-source-files: CHANGELOG.md
+
+source-repository head
+  type:     git
+  location: https://github.com/hstreamdb/diff-flow
+
+library
+  exposed-modules:
+    DiffFlow.Error
+    DiffFlow.Graph
+    DiffFlow.Shard
+    DiffFlow.Types
+    DiffFlow.Weird
+
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , deepseq
+    , extra
+    , hashable
+    , hstream-common
+    , hstream-common-base
+    , multiset
+    , stm
+    , text
+    , universe-base
+    , unordered-containers
+    , vector
+    , Z-Data
+
+  hs-source-dirs:   src
+  default-language: Haskell2010
+
+test-suite lib-test
+  type:               exitcode-stdio-1.0
+  main-is:            Spec.hs
+  other-modules:
+    DiffFlow.LoopSpec
+    DiffFlow.TypesSpec
+
+  hs-source-dirs:     test
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , diff-flow
+    , hashable
+    , hspec
+    , hstream-common
+    , multiset
+    , text
+    , unordered-containers
+    , vector
+
+  default-language:   Haskell2010
+  build-tool-depends: hspec-discover:hspec-discover >=2 && <3
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+
+executable example
+  main-is:          example/Main.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , diff-flow
+    , hashable
+    , hspec
+    , hstream-common
+    , multiset
+    , text
+    , unordered-containers
+    , vector
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable example-2
+  main-is:          example/Reduce.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , diff-flow
+    , hashable
+    , hspec
+    , hstream-common
+    , multiset
+    , text
+    , unordered-containers
+    , vector
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable example-3
+  main-is:          example/Distinct.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , diff-flow
+    , hashable
+    , hspec
+    , hstream-common
+    , multiset
+    , text
+    , unordered-containers
+    , vector
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable example-4
+  main-is:          example/Loop.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , containers
+    , diff-flow
+    , hashable
+    , hspec
+    , hstream-common
+    , multiset
+    , text
+    , unordered-containers
+    , vector
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+benchmark lib-bench
+  type:             exitcode-stdio-1.0
+  main-is:          bench/benchmark.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , criterion
+    , diff-flow
+    , hstream-common
+    , time
+    , unordered-containers
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable throughout-bench-reduce
+  main-is:          bench/throughout-reduce.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , diff-flow
+    , hstream-common
+    , time
+    , unordered-containers
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable throughout-bench-join
+  main-is:          bench/throughout-join.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , diff-flow
+    , hstream-common
+    , time
+    , unordered-containers
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable throughout-bench-map
+  main-is:          bench/throughout-map.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , diff-flow
+    , hstream-common
+    , time
+    , unordered-containers
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N

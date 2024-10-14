@@ -1,22 +1,26 @@
+{-# LANGUAGE AllowAmbiguousTypes       #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE NoImplicitPrelude         #-}
 {-# LANGUAGE OverloadedStrings         #-}
 {-# LANGUAGE RecordWildCards           #-}
 {-# LANGUAGE StrictData                #-}
+{-# LANGUAGE TypeApplications          #-}
 
 module HStream.Processing.Processor.Internal where
 
-import           Control.Exception        (throw)
+import           Control.Exception                      (throw)
 import           Data.Default
 import           Data.Typeable
-import           HStream.Processing.Error (HStreamError (..))
+import           HStream.Processing.Error               (HStreamProcessingError (..))
+import           HStream.Processing.Processor.ChangeLog
+import           HStream.Processing.Processor.Snapshot
 import           HStream.Processing.Store
 import           HStream.Processing.Type
 import           RIO
-import qualified RIO.ByteString.Lazy      as BL
-import qualified RIO.HashMap              as HM
-import qualified RIO.HashSet              as HS
-import qualified RIO.Text                 as T
+import qualified RIO.ByteString.Lazy                    as BL
+import qualified RIO.HashMap                            as HM
+import qualified RIO.HashSet                            as HS
+import qualified RIO.Text                               as T
 
 newtype Processor kin vin = Processor {runP :: Record kin vin -> RIO TaskContext ()}
 
@@ -37,8 +41,8 @@ newtype SourceProcessor = SourceProcessor {runSourceP :: RIO TaskContext ()}
 newtype SinkProcessor = SinkProcessor {runSinkP :: BL.ByteString -> RIO TaskContext ()}
 
 data Record k v = Record
-  { recordKey :: Maybe k,
-    recordValue :: v,
+  { recordKey       :: Maybe k,
+    recordValue     :: v,
     recordTimestamp :: Timestamp
   }
 
@@ -48,12 +52,91 @@ mkERecord :: (Typeable k, Typeable v) => Record k v -> ERecord
 mkERecord = ERecord
 
 data TaskTopologyConfig = TaskTopologyConfig
-  { ttcName :: T.Text,
+  { ttcName    :: T.Text,
     sourceCfgs :: HM.HashMap T.Text InternalSourceConfig,
-    topology :: HM.HashMap T.Text (EProcessor, [T.Text]),
-    sinkCfgs :: HM.HashMap T.Text InternalSinkConfig,
-    stores :: HM.HashMap T.Text (EStateStore, HS.HashSet T.Text)
+    topology   :: HM.HashMap T.Text (EProcessor, [T.Text]),
+    sinkCfgs   :: HM.HashMap T.Text InternalSinkConfig,
+    stores     :: HM.HashMap T.Text (EStateStore, HS.HashSet T.Text)
   }
+
+----
+applyStateStoreChangelog :: (Typeable k, Typeable v, Typeable ser,
+                             Ord k, Ord ser)
+                         => TaskBuilder -> StateStoreChangelog k v ser -> IO TaskBuilder
+applyStateStoreChangelog builder@TaskTopologyConfig{..} cl = case cl of
+  CLKSPut storeName k v -> do
+    case HM.lookup storeName stores of
+      Nothing      -> return builder -- FIXME: log error message
+      Just (ess,_) -> case ess of
+        EKVStateStore dekvs -> do
+          let ekvs = fromDEKVStoreToEKVStore dekvs
+          ksPut k v ekvs
+          return builder
+        _                   -> return builder -- FIXME: log error message
+  CLSSPut storeName tk v -> do
+    case HM.lookup storeName stores of
+      Nothing      -> return builder -- FIXME: log error message
+      Just (ess,_) -> case ess of
+        ESessionStateStore desss -> do
+          let esss = fromDESessionStoreToESessionStore desss
+          ssPut tk v esss
+          return builder
+        _                        -> return builder -- FIXME: log error message
+  CLSSRemove storeName tk -> do
+    case HM.lookup storeName stores of
+      Nothing      -> return builder -- FIXME: log error message
+      Just (ess,_) -> case ess of
+        ESessionStateStore desss -> do
+          let esss = fromDESessionStoreToESessionStore @_ @() desss
+          ssRemove tk esss
+          return builder
+        _                        -> return builder -- FIXME: log error message
+  CLTKSPut storeName tsk ser -> do
+    case HM.lookup storeName stores of
+      Nothing      -> return builder -- FIXME: log error message
+      Just (ess,_) -> case ess of
+        ETimestampedKVStateStore detkvs -> do
+          let etkvs = fromDETimestampedKVStoreToETimestampedKVStore detkvs
+          tksPut tsk ser etkvs
+          return builder
+        _                               -> return builder -- FIXME: log error message
+
+applyStateStoreSnapshot :: (Typeable k, Ord k, Typeable v, Typeable ser,
+                            Ord ser)
+                        => TaskBuilder
+                        -> StateStoreSnapshotKey
+                        -> StateStoreSnapshotValue i k v ser
+                        -> IO (Maybe TaskBuilder, i)
+applyStateStoreSnapshot builder@TaskTopologyConfig{..} k v = do
+  let storeName = snapshotStoreName k
+  case v of
+    SnapshotKS i extData -> do
+      case HM.lookup storeName stores of
+        Nothing      -> return (Nothing, i) -- FIXME: log error message
+        Just (ess,_) -> case ess of
+          EKVStateStore dekvs -> do
+            let ekvs = fromDEKVStoreToEKVStore dekvs
+            ksImport ekvs extData
+            return (Just builder, i)
+          _                   -> return (Nothing, i)
+    SnapshotSS i extData -> do
+      case HM.lookup storeName stores of
+        Nothing      -> return (Nothing, i) -- FIXME: log error message
+        Just (ess,_) -> case ess of
+          ESessionStateStore desss -> do
+            let esss = fromDESessionStoreToESessionStore desss
+            ssImport esss extData
+            return (Just builder, i)
+          _                        -> return (Nothing, i) -- FIXME: log error message
+    SnapshotTKS i extData -> do
+      case HM.lookup storeName stores of
+        Nothing      -> return (Nothing, i) -- FIXME: log error message
+        Just (ess,_) -> case ess of
+          ETimestampedKVStateStore detkvs -> do
+            let etkvs = fromDETimestampedKVStoreToETimestampedKVStore detkvs
+            tksImport etkvs extData
+            return (Just builder, i)
+          _                               -> return (Nothing, i) -- FIXME: log error message
 
 instance Default TaskTopologyConfig where
   def =
@@ -112,41 +195,46 @@ getTaskName :: TaskTopologyConfig -> T.Text
 getTaskName TaskTopologyConfig {..} = ttcName
 
 data InternalSourceConfig = InternalSourceConfig
-  { iSourceName :: T.Text,
-    iSourceTopicName :: T.Text
+  { iSourceName       :: T.Text,
+    iSourceStreamName :: T.Text
   }
 
 data InternalSinkConfig = InternalSinkConfig
-  { iSinkName :: T.Text,
-    iSinkTopicName :: T.Text
+  { iSinkName       :: T.Text,
+    iSinkStreamName :: T.Text
   }
 
 type TaskBuilder = TaskTopologyConfig
 
 data Task = Task
-  { taskName :: T.Text,
-    taskSourceConfig :: HM.HashMap T.Text InternalSourceConfig,
+  { taskName             :: T.Text,
+    taskSourceConfig     :: HM.HashMap T.Text InternalSourceConfig,
     taskTopologyReversed :: HM.HashMap T.Text (EProcessor, [T.Text]),
-    taskTopologyForward :: HM.HashMap T.Text (EProcessor, [T.Text]),
-    taskSinkConfig :: HM.HashMap T.Text InternalSinkConfig,
-    taskStores :: HM.HashMap T.Text (EStateStore, HS.HashSet T.Text)
+    taskTopologyForward  :: HM.HashMap T.Text (EProcessor, [T.Text]),
+    taskSinkConfig       :: HM.HashMap T.Text InternalSinkConfig,
+    taskStores           :: HM.HashMap T.Text (EStateStore, HS.HashSet T.Text)
   }
 
-data TaskContext = TaskContext
-  { taskConfig :: Task,
-    tctLogFunc :: LogFunc,
-    curProcessor :: IORef T.Text,
-    tcTimestamp :: IORef Int64
+data TaskContext = forall h1 h2. (ChangeLogger h1, Snapshotter h2) => TaskContext
+  { taskConfig     :: Task,
+    tctLogFunc     :: LogFunc,
+    curProcessor   :: IORef T.Text,
+    tcTimestamp    :: IORef Int64,
+    tcChangeLogger :: h1,
+    tcSnapshotter  :: h2
   }
 
 instance HasLogFunc TaskContext where
   logFuncL = lens tctLogFunc (\x y -> x {tctLogFunc = y})
 
 buildTaskContext ::
+  (ChangeLogger h1, Snapshotter h2) =>
   Task ->
   LogFunc ->
+  h1 ->
+  h2 ->
   IO TaskContext
-buildTaskContext task lf = do
+buildTaskContext task lf changeLogger snapshotter = do
   pRef <- newIORef ""
   tRef <- newIORef (-1)
   return $
@@ -154,7 +242,9 @@ buildTaskContext task lf = do
       { taskConfig = task,
         tctLogFunc = lf,
         curProcessor = pRef,
-        tcTimestamp = tRef
+        tcTimestamp = tRef,
+        tcChangeLogger = changeLogger,
+        tcSnapshotter = snapshotter
       }
 
 updateTimestampInTaskContext :: TaskContext -> Timestamp -> IO ()

@@ -5,7 +5,7 @@ synopsis:
   High performance stream processing platform for IoT data written in Haskell.
 
 description:
-  Please see the README on Github at
+  Please see the README on GitHub at
   <https://github.com/hstreamdb/hstream#readme>
 
 license:            BSD-3-Clause
@@ -13,13 +13,14 @@ license-file:       LICENSE
 copyright:          Copyright (c) 2020 EMQ Technologies Co., Ltd.
 author:             Feng Lee <feng@emqx.io>
 maintainer:         lambda@emqx.io
-tested-with:        GHC ==8.8.4 || ==8.10.4
+tested-with:        GHC ==8.10.4
 category:           Database
 homepage:           https://github.com/hstreamdb/hstream
 bug-reports:        https://github.com/hstreamdb/hstream/issues
 build-type:         Custom
 extra-source-files:
   ChangeLog.md
+  include/ghc_ext.h
   include/hs_logdevice.h
   README.md
 
@@ -32,54 +33,68 @@ source-repository head
   type:     git
   location: https://github.com/hstreamdb/hstream
 
-executable hstore-server
-  main-is:          hstore.hs
-  hs-source-dirs:   app
-  build-depends:
-    , base                  >=4.13 && <5
-    , hstream-store
-    , optparse-applicative  ^>=0.16
-    , raw-strings-qq        ^>=1.1
-    , Z-Data
-    , Z-IO
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
 
-  default-language: Haskell2010
+flag hstream_store_enable_asan
+  default:     False
+  description:
+    Enable AddressSanitizer, see: https://github.com/google/sanitizers/wiki/AddressSanitizer.
+    Because of using shared ASan DSO, LD_PRELOAD'ing Asan runtime is required. For example,
+    1. Build with the flag: `cabal build --flags hstream_store_enable_asan hstream-store-test`.
+    2. Find the asan used: `ldd /path/to/hstream-store-test | grep asan`, e.g. /lib/x86_64-linux-gnu/libasan.so.6
+    3. Run: `LD_PRELOAD=/lib/x86_64-linux-gnu/libasan.so.6 /path/to/hstream-store-test`
+
+common shared-properties
   ghc-options:
     -Wall -Wcompat -Widentities -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
-    -threaded -rtsopts -with-rtsopts=-N
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
 
 library
+  import:             shared-properties
   exposed-modules:
     HStream.Store
     HStream.Store.Internal.LogDevice
-    HStream.Store.RPC.MessagePack
+    HStream.Store.Logger
 
   other-modules:
-    HStream.Store.AdminClient
     HStream.Store.Exception
-    HStream.Store.Internal.FFI
     HStream.Store.Internal.Foreign
     HStream.Store.Internal.LogDevice.Checkpoint
+    HStream.Store.Internal.LogDevice.Configuration
+    HStream.Store.Internal.LogDevice.LDQuery
+    HStream.Store.Internal.LogDevice.LogAttributes
     HStream.Store.Internal.LogDevice.LogConfigTypes
     HStream.Store.Internal.LogDevice.Reader
     HStream.Store.Internal.LogDevice.VersionedConfigStore
+    HStream.Store.Internal.LogDevice.Writer
+    HStream.Store.Internal.LogDevice.HealthCheck
     HStream.Store.Internal.Types
-    HStream.Store.Logger
     HStream.Store.Stream
 
   build-depends:
-    , base           >=4.13    && <5
-    , cache          ^>=0.1
-    , containers     ^>=0.6
-    , ghc-prim       >=0.5     && <1.0
-    , primitive      ^>=0.7
-    , random         ^>=1.2
-    , time           >=1.9     && <2.0
+    , base                 >=4.13  && <5
+    , bytestring           >=0.10  && <0.12
+    , cache                ^>=0.1
+    , containers           ^>=0.6
+    , data-default         ^>=0.7
+    , filepath
+    , ghc-prim             >=0.5   && <1.0
+    , hashable             >=1.3.5 && <1.5
+    , hstream-common-base
+    , primitive            ^>=0.7
+    , text
+    , vector               >=0.12  && <0.14
+    , vector-algorithms    ^>=0.9
     , Z-Data
-    , Z-IO
-    , Z-MessagePack  >=0.4.1   && <1
-    , zoovisitor     >=0.1.1.1 && <1
 
   default-language:   Haskell2010
   default-extensions:
@@ -99,54 +114,212 @@ library
     stdc++
     folly
     logdevice
-    logdevice_admin_clients
+    ldquery
     thriftcpp2
     thriftprotocol
     glog
     boost_context
 
+  if flag(hstream_store_enable_asan)
+    extra-libraries: asan
+    cxx-options:     -fsanitize=address -fno-omit-frame-pointer
+
+  -- Add this -DHSTREAM_USE_SHARED_CHECKPOINT_STORE to cxx-options to enable
+  -- shared CheckpointStore
   cxx-options:        -std=c++17
   cpp-options:        -std=c++17
   cxx-sources:
-    cbits/hs_checkpoint.cpp
     cbits/hs_logdevice.cpp
-    cbits/hs_logdevice_admin.cpp
-    cbits/hs_logdevice_appender.cpp
-    cbits/hs_logdevice_reader.cpp
+    cbits/logdevice/hs_checkpoint.cpp
+    cbits/logdevice/hs_ldquery.cpp
+    cbits/logdevice/hs_log_attributes.cpp
     cbits/logdevice/hs_logconfigtypes.cpp
+    cbits/logdevice/hs_reader.cpp
     cbits/logdevice/hs_versioned_config_store.cpp
+    cbits/logdevice/hs_writer.cpp
+    cbits/logdevice/ld_configuration.cpp
+    cbits/logdevice/ld_health_checker.cpp
     cbits/utils.cpp
 
   extra-lib-dirs:     /usr/local/lib
   includes:           hs_logdevice.h
   include-dirs:       include /usr/local/include
-  build-tool-depends: hsc2hs:hsc2hs -any
-  ghc-options:
-    -Wall -Wcompat -Widentities -Wincomplete-record-updates
-    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+  build-tool-depends:
+    , cpphs:cpphs    >=1.20 && <1.21
+    , hsc2hs:hsc2hs
 
 test-suite hstream-store-test
+  import:             shared-properties
   type:               exitcode-stdio-1.0
   main-is:            Spec.hs
   other-modules:
-    HStream.Store.AppenderSpec
+    HStream.Store.CheckpointStoreSpec
+    HStream.Store.LogDeviceSpec
     HStream.Store.ReaderSpec
+    HStream.Store.SettingsSpec
     HStream.Store.SpecUtils
-    HStream.Store.TopicSpec
+    HStream.Store.StreamSpec
+    HStream.Store.WriterSpec
     HStream.StoreSpec
 
   hs-source-dirs:     test
   build-depends:
-    , base           >=4.11 && <5
-    , containers     ^>=0.6
+    , base                  >=4.11    && <5
+    , bytestring
+    , containers            ^>=0.6
+    , data-default          ^>=0.7
     , hspec
+    , hstream-common-base
     , hstream-store
-    , random         ^>=1.2
+    , QuickCheck
+    , quickcheck-instances  ^>=0.3.20
+    , random                ^>=1.2
+    , time
+    , vector                >=0.12    && <0.14
     , Z-Data
 
   default-language:   Haskell2010
-  build-tool-depends: hspec-discover:hspec-discover ==2.*
-  ghc-options:
-    -Wall -Wcompat -Widentities -Wincomplete-record-updates
-    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
-    -threaded -rtsopts -with-rtsopts=-N
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+  build-tool-depends: hspec-discover:hspec-discover >=2 && <3
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+
+benchmark hstore-bench-append
+  import:             shared-properties
+  type:               exitcode-stdio-1.0
+  main-is:            AppendBench.hs
+  hs-source-dirs:     bench
+  build-depends:
+    , base                  >=4.11  && <5
+    , bytestring
+    , byteunits             ^>=0.4
+    , criterion
+    , hstream-store
+    , optparse-applicative  ^>=0.16
+    , Z-Data
+
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+  default-language:   Haskell2010
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+
+benchmark hstore-bench-append-batch
+  import:             shared-properties
+  type:               exitcode-stdio-1.0
+  main-is:            AppendBatchBench.hs
+  hs-source-dirs:     bench
+  build-depends:
+    , base                  >=4.11  && <5
+    , bytestring
+    , byteunits             ^>=0.4
+    , criterion
+    , hstream-store
+    , optparse-applicative  ^>=0.16
+    , Z-Data
+
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+  default-language:   Haskell2010
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+
+benchmark hstore-bench-stream
+  import:           shared-properties
+  type:             exitcode-stdio-1.0
+  main-is:          StreamBench.hs
+  hs-source-dirs:   bench
+  build-depends:
+    , base                  >=4.11    && <5
+    , bytestring
+    , byteunits             ^>=0.4
+    , criterion
+    , hstream-store
+    , optparse-applicative  ^>=0.16
+    , unordered-containers  ^>=0.2.19
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+benchmark hstore-bench-log-extra-attrs
+  import:           shared-properties
+  type:             exitcode-stdio-1.0
+  main-is:          LogExtraAttrs.hs
+  hs-source-dirs:   bench
+  build-depends:
+    , base           >=4.11 && <5
+    , bytestring
+    , containers
+    , hstream-store
+    , time
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable hstore-bench-writter
+  import:           shared-properties
+  main-is:          writeBench.hs
+  hs-source-dirs:   app
+  build-depends:
+    , async
+    , base
+    , bytestring
+    , containers
+    , data-default
+    , hstream-store
+    , optparse-applicative  ^>=0.16
+    , random
+    , time
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+benchmark hstore-sort-bench
+  import:           shared-properties
+  type:             exitcode-stdio-1.0
+  main-is:          SortBench.hs
+  hs-source-dirs:   bench
+  build-depends:
+    , base               >=4.11 && <5
+    , bytestring
+    , criterion
+    , random
+    , vector
+    , vector-algorithms
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N

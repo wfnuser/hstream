@@ -1,224 +1,799 @@
-{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE BangPatterns    #-}
+{-# LANGUAGE CPP             #-}
+{-# LANGUAGE MultiWayIf      #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 module HStream.Store.Stream
-  ( -- * StreamName
-    StreamName
-  , FFI.LogAttrs (LogAttrs)
-  , FFI.HsLogAttrs (..)
+  ( -- * Stream
+    StreamSettings (..)
+  , updateGloStreamSettings
+  , StreamType (..)
+  , StreamId (streamType, streamName)
+  , ArchivedStream (getArchivedStreamName)
+  , isArchiveStreamName
+  , showStreamName
+  , mkStreamId
+  , mkStreamIdFromFullLogDir
+  , getStreamLogAttrs
+  , getStreamPartitionHeadTimestamp
+  , getStreamPartitionExtraAttrs
+  , transToStreamName
+  , transToTempStreamName
+  , transToViewStreamName
+  , transToTopicStreamName
+    -- ** Operations
   , createStream
+  , createStreamPartition
   , renameStream
+  , renameStream'
+  , archiveStream
+  , doesArchivedStreamExist
+  , unArchiveStream
+  , removeArchivedStream
   , removeStream
-  , doesStreamExists
+  , findStreams
+  , doesStreamExist
+  , listStreamPartitions
+  , listStreamPartitionsOrdered
+  , listStreamPartitionsOrderedByName
+  , doesStreamPartitionExist
+  , doesStreamPartitionValExist
+  , getStreamExtraAttrs
+  , updateStreamExtraAttrs
+    -- ** helpers
+  , getUnderlyingLogId
+  , getStreamIdFromLogId
 
+    -- * Logdevice
   , FFI.LogID (..)
   , FFI.C_LogID
-  , getCLogIDByStreamName
-  , LD.getLogGroup
-  , LD.getLogGroupByID
-  , LD.logGroupGetName
-  , LD.logGroupGetFullyQualifiedName
-  , LD.logGroupGetExtraAttr
-  , LD.logGroupUpdateExtraAttrs
+  , FFI.LDLogGroup
+  , FFI.LDDirectory
+  , FFI.NodeLocationScope (..)
+  , pattern FFI.NodeLocationScope_NODE
+  , pattern FFI.NodeLocationScope_RACK
+  , pattern FFI.NodeLocationScope_ROW
+  , pattern FFI.NodeLocationScope_CLUSTER
+  , pattern FFI.NodeLocationScope_DATA_CENTER
+  , pattern FFI.NodeLocationScope_REGION
+  , pattern FFI.NodeLocationScope_ROOT
+  , pattern FFI.NodeLocationScope_INVALID
 
-    -- * Writer
+    -- * Log attributes
+  , LD.Attribute (..)
+  , LD.LogAttributes (..)
+  , LD.defAttr1
+
+    -- * Logdevice Writer
   , LD.append
-  , appendRecord
-  , ProducerRecord (..)
+  , LD.appendBS
+  , LD.appendCompressedBS
+  , LD.appendBatch
+  , LD.appendBatchBS
+  , LD.AppendCompletion (..)
   , FFI.KeyType
-  , FFI.keyTypeFindKey
-  , FFI.keyTypeFilterable
-  , FFI.AppendCallBackData (..)
-  , encodeRecord
+  , pattern FFI.KeyTypeFindKey
+  , pattern FFI.KeyTypeFilterable
+  , pattern FFI.KeyTypeUndefined
+  , FFI.Compression (..)
 
-    -- * Reader
-  , ConsumerRecord (..)
-  , decodeRecord
-  , FFI.DataRecord (..)
-
+    -- * Logdevice Checkpoint Store
+  , FFI.LDCheckpointStore
   , LD.newFileBasedCheckpointStore
   , LD.newRSMBasedCheckpointStore
   , LD.newZookeeperBasedCheckpointStore
   , LD.ckpStoreGetLSN
+  , LD.ckpStoreGetAllCheckpoints
+  , LD.ckpStoreGetAllCheckpoints'
+  , LD.ckpStoreUpdateLSN
+  , LD.ckpStoreUpdateMultiLSN
+  , LD.ckpStoreRemoveCheckpoints
+  , LD.ckpStoreRemoveAllCheckpoints
+    --
+  , initOffsetCheckpointDir
+  , allocOffsetCheckpointId
+  , freeOffsetCheckpointId
+    --
+  , initSubscrCheckpointDir
+  , allocSubscrCheckpointId
+  , getSubscrCheckpointId
+  , freeSubscrCheckpointId
 
+    -- * Logdevice Reader
+  , FFI.RecordByteOffset (..)
+  , FFI.DataRecord (..)
+  , FFI.DataRecordAttr (..)
+  , FFI.GapRecord (..)
+  , FFI.GapType
+  , pattern FFI.GapTypeUnknown
+  , pattern FFI.GapTypeBridge
+  , pattern FFI.GapTypeHole
+  , pattern FFI.GapTypeDataloss
+  , pattern FFI.GapTypeTrim
+  , pattern FFI.GapTypeAccess
+  , pattern FFI.GapTypeNotInConfig
+  , pattern FFI.GapTypeFilteredOut
+  , pattern FFI.GapTypeMax
+  , FFI.recordLogID
+  , FFI.recordLSN
+  , FFI.recordTimestamp
+  , FFI.recordBatchOffset
+  , FFI.recordByteOffset
+  , FFI.LDReader
   , LD.newLDReader
   , LD.readerStartReading
+  , LD.DataRecordFormat
   , LD.readerRead
+  , LD.readerReadSome
+  , LD.readerReadAllowGap
   , LD.readerSetTimeout
-  , readerReadRecord
-  , stopReader
-
+  , LD.readerSetWithoutPayload
+  , LD.readerSetIncludeByteOffset
+  , LD.readerSetWaitOnlyWhenNoData
+  , LD.readerStopReading
+  , LD.readerIsReadingAny
+  , LD.readerIsReading
+    -- ** Checkpointed Reader
+  , FFI.LDSyncCkpReader
   , newLDFileCkpReader
   , newLDRsmCkpReader
+  , newLDRsmCkpReader'
   , newLDZkCkpReader
-  , LD.writeCheckpoints
-  , LD.writeLastCheckpoints
   , LD.ckpReaderStartReading
   , LD.startReadingFromCheckpoint
+  , LD.startReadingFromCheckpointOrStart
   , LD.ckpReaderRead
+  , LD.ckpReaderReadSome
+  , LD.ckpReaderReadAllowGap
   , LD.ckpReaderSetTimeout
-  , stopCkpReader
+  , LD.ckpReaderSetWithoutPayload
+  , LD.ckpReaderSetIncludeByteOffset
+  , LD.ckpReaderSetWaitOnlyWhenNoData
+  , LD.ckpReaderStopReading
+  , LD.writeCheckpoints
+  , LD.writeLastCheckpoints
+  , LD.removeCheckpoints
+  , LD.removeAllCheckpoints
+
+    -- * Internal logs
+  , checkpointStoreLogID
+  , initCheckpointStoreLogID
+
+    -- * Internal helpers
+  , getStreamDirPath
+  , getStreamLogPath
+  , createRandomLogGroup
+
+  , LD.LdChecker
+  , LD.newLdChecker
+  , LD.isLdClusterHealthy
+
+    -- * Re-export
+  , def
   ) where
 
-import           Control.Exception                (try)
-import           Control.Monad                    (unless)
-import           Data.Bits                        (shiftL, shiftR, (.&.), (.|.))
-import qualified Data.Cache                       as Cache
+import           Control.Exception                (catch, try)
+import           Control.Monad                    (filterM, forM, (<=<))
+import           Control.Monad.Primitive          (PrimMonad, PrimState)
+import           Data.Bifunctor                   (bimap)
+import           Data.Bits                        (bit)
+import           Data.Default                     (def)
+import           Data.Foldable                    (foldrM)
+import           Data.Hashable                    (Hashable)
 import           Data.Int                         (Int64)
-import           Data.Time.Clock.System           (SystemTime (..))
-import           Data.Word                        (Word16, Word32, Word64)
+import           Data.IORef                       (IORef, atomicModifyIORef',
+                                                   newIORef, readIORef)
+import           Data.Map.Strict                  (Map)
+import qualified Data.Map.Strict                  as Map
+import           Data.Text                        (Text)
+import qualified Data.Text                        as T
+import           Data.Vector                      (Vector)
+import qualified Data.Vector                      as V
+import qualified Data.Vector.Algorithms.Intro     as V
+import qualified Data.Vector.Generic.Mutable      as VGM
 import           Foreign.C                        (CSize)
+import           Foreign.ForeignPtr               (withForeignPtr)
 import           GHC.Generics                     (Generic)
 import           GHC.Stack                        (HasCallStack, callStack)
 import           System.IO.Unsafe                 (unsafePerformIO)
-import           System.Random                    (randomRIO)
+#if !MIN_VERSION_filepath(1, 4, 100)
+import qualified System.FilePath.Posix            as P
+#else
+import qualified System.OsPath.Posix              as P
+import qualified System.OsString.Internal.Types   as P
+#endif
+import qualified Z.Data.Builder                   as ZB
+import qualified Z.Data.CBytes                    as CBytes
 import           Z.Data.CBytes                    (CBytes)
-import qualified Z.Data.JSON                      as JSON
-import qualified Z.Data.MessagePack               as MP
-import           Z.Data.Vector                    (Bytes)
-import           Z.IO.Time                        (getSystemTime')
+import qualified Z.Data.Text                      as ZT
+import qualified Z.Data.Vector                    as ZV
 
+import           HStream.Base                     (genUnique)
+import           HStream.Base.Bytes               (cbytes2sbs, cbytes2sbsUnsafe,
+                                                   sbs2cbytes, sbs2cbytesUnsafe)
+import qualified HStream.Logger                   as Log
 import qualified HStream.Store.Exception          as E
 import qualified HStream.Store.Internal.LogDevice as LD
 import qualified HStream.Store.Internal.Types     as FFI
 
+-- Comment this to disable local cache
+-- #define HSTREAM_USE_LOCAL_STREAM_CACHE
+
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+import           Control.Concurrent               (MVar, modifyMVar_, newMVar,
+                                                   readMVar)
+import           Control.Exception                (finally)
+import           Control.Monad                    (forM_)
+import qualified Data.Cache                       as Cache
+import           Data.Maybe                       (isJust)
+#endif
+
 -------------------------------------------------------------------------------
+
+data StreamSettings = StreamSettings
+  { streamNameLogDir    :: CBytes
+  , streamViewLogDir    :: CBytes
+  , streamTempLogDir    :: CBytes
+  , streamTopicLogDir   :: CBytes
+  , streamDefaultKey    :: CBytes
+  , streamArchivePrefix :: CBytes
+  }
+
+gloStreamSettings :: IORef StreamSettings
+gloStreamSettings = unsafePerformIO . newIORef $
+  -- NOTE: no trailing slash
+  StreamSettings { streamNameLogDir    = "/hstream/stream"
+                 , streamViewLogDir    = "/hstream/view"
+                 , streamTempLogDir    = "/tmp/hstream"
+                 , streamTopicLogDir   = "/hstream/topic"
+                 , streamDefaultKey    = "__default_key__"
+                 , streamArchivePrefix = "__archive__"
+                 }
+{-# NOINLINE gloStreamSettings #-}
+
+updateGloStreamSettings :: (StreamSettings -> StreamSettings)-> IO ()
+updateGloStreamSettings f = atomicModifyIORef' gloStreamSettings $ \s -> (f s, ())
+
+subscriptionCheckpointDir :: CBytes
+subscriptionCheckpointDir = "/hstream/subscription/checkpoint"
+
+offsetCheckpointDir :: CBytes
+offsetCheckpointDir = "/hstream/offset/checkpoint"
+
+-------------------------------------------------------------------------------
+
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+
+-- StreamId : { streamKey: logid }
+type StreamCache = Cache.Cache StreamId (Map CBytes FFI.C_LogID)
+
+-- | Global logdir path to logid cache
+--
+-- Note: for a cluster version, to make the cache work properly, all operations
+-- of one stream (e.g. create, delete, ...) must be processed by only one
+-- specific server.
+gloLogPathCache :: MVar StreamCache
+gloLogPathCache = unsafePerformIO $ newMVar =<< Cache.newCache Nothing
+{-# NOINLINE gloLogPathCache #-}
+
+getGloLogPathCache :: StreamId -> CBytes -> IO (Maybe FFI.C_LogID)
+getGloLogPathCache streamid key = do
+  cache <- readMVar gloLogPathCache
+  m_v <- Cache.lookup' cache streamid
+  case m_v of
+    Nothing -> pure Nothing
+    Just mp -> pure $ Map.lookup key mp
+
+doesCacheExist :: StreamId -> IO Bool
+doesCacheExist streamid = do
+  cache <- readMVar gloLogPathCache
+  isJust <$> Cache.lookup' cache streamid
+
+updateGloLogPathCache :: StreamId -> CBytes -> FFI.C_LogID -> IO ()
+updateGloLogPathCache streamid key logid =
+  modifyMVar_ gloLogPathCache $ \c -> do
+    m_v <- Cache.lookup' c streamid
+    case m_v of
+      Nothing -> Cache.insert c streamid (Map.singleton key logid) >> pure c
+      Just mp -> Cache.insert c streamid (Map.insert key logid mp) >> pure c
+
+#endif
+
+-------------------------------------------------------------------------------
+
+newtype ArchivedStream = ArchivedStream { getArchivedStreamName :: CBytes}
+
+isArchiveStreamName :: StreamName -> IO Bool
+isArchiveStreamName name = do
+  prefix <- CBytes.toBytes . streamArchivePrefix <$> readIORef gloStreamSettings
+  let name' = CBytes.toBytes name
+  pure $ prefix `ZV.isPrefixOf` name'
+
+-- ArchivedStreamName format: "prefix + name + unique word64"
+toArchivedStreamName :: StreamId -> IO CBytes
+toArchivedStreamName StreamId{..} = do
+  -- After a stream has been archived, a new stream with the same name as the
+  -- previous one is allowed to be created. The unique suffix is used to ensure
+  -- that the following scenarios are executed correctly:
+  --    step1. create stream "test"
+  --    step2. archive stream "test"
+  --    step3. create stream "test"
+  --    step4. archive stream "test"
+  -- If the suffix isn't unique, step4 will failed.
+  suffix <- CBytes.buildCBytes . ZB.int <$> genUnique
+  already <- isArchiveStreamName streamName
+  if already
+     then pure $ streamName <> suffix
+     else do prefix <- streamArchivePrefix <$> readIORef gloStreamSettings
+             pure $ prefix <> streamName <> suffix
+
+-------------------------------------------------------------------------------
+
+data StreamType = StreamTypeStream | StreamTypeView | StreamTypeTemp | StreamTypeTopic
+  deriving (Show, Eq, Generic)
+
+instance Hashable StreamType
 
 type StreamName = CBytes
 
--- | Global Stream name to logid cache
-topicNameCache :: Cache.Cache StreamName FFI.C_LogID
-topicNameCache = unsafePerformIO $ Cache.newCache Nothing
-{-# NOINLINE topicNameCache #-}
+data StreamId = StreamId
+  { streamType :: StreamType
+  , streamName :: StreamName
+  -- ^ A stream name is an identifier of the stream.
+  -- The first character of the StreamName should not be '/'.
+  } deriving (Show, Eq, Generic)
+
+instance Hashable StreamId
+
+-- TODO: validation, a stream name should not:
+-- 1. Contains '/'
+-- 2. Start with "__"
+mkStreamId :: StreamType -> CBytes -> StreamId
+mkStreamId = StreamId
+
+mkStreamIdFromFullLogDir :: StreamType -> CBytes -> IO StreamId
+mkStreamIdFromFullLogDir streamType path = do
+  s <- readIORef gloStreamSettings
+  let name =
+        case streamType of
+          StreamTypeStream -> t2 P.makeRelative (streamNameLogDir s) path
+          StreamTypeView   -> t2 P.makeRelative (streamViewLogDir s) path
+          StreamTypeTemp   -> t2 P.makeRelative (streamTempLogDir s) path
+          StreamTypeTopic  -> t2 P.makeRelative (streamTopicLogDir s) path
+  return $ StreamId streamType name
+
+showStreamName :: StreamId -> String
+showStreamName = CBytes.unpack . streamName
+
+transToStreamName :: Text -> StreamId
+transToStreamName = mkStreamId StreamTypeStream . textToCBytes
+
+transToTempStreamName :: Text -> StreamId
+transToTempStreamName = mkStreamId StreamTypeTemp . textToCBytes
+
+transToViewStreamName :: Text -> StreamId
+transToViewStreamName = mkStreamId StreamTypeView . textToCBytes
+
+transToTopicStreamName :: Text -> StreamId
+transToTopicStreamName = mkStreamId StreamTypeTopic . textToCBytes
+
+textToCBytes :: Text -> CBytes.CBytes
+textToCBytes = CBytes.pack . T.unpack
+{-# INLINE textToCBytes #-}
+
+-------------------------------------------------------------------------------
 
 -- | Create stream
 --
--- Currently a Stream is a loggroup which only contains one random logid.
-createStream :: HasCallStack => FFI.LDClient -> StreamName -> FFI.LogAttrs -> IO ()
-createStream client topic attrs = go 10
-  where
-    go :: Int -> IO ()
-    go maxTries =
-      if maxTries <= 0
-         then E.throwStoreError "Ran out all retries, but still failed :(" callStack
-         else do
-           logid <- genRandomLogID
-           result <- try $ LD.makeLogGroup client topic logid logid attrs True
-           case result of
-             Right group -> do
-               LD.syncLogsConfigVersion client =<< LD.logGroupGetVersion group
-               Cache.insert topicNameCache topic logid
-             Left (_ :: E.ID_CLASH) -> go $! maxTries - 1
+-- Currently a Stream is a logdir.
+createStream
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> LD.LogAttributes
+  -> IO ()
+createStream client streamid attrs = do
+  path <- getStreamDirPath streamid
+  dir <- LD.makeLogDirectory client path attrs True
+  LD.syncLogsConfigVersion client =<< LD.logDirectoryGetVersion dir
+
+-- | Create a partition of a stream. If the stream doesn't exist, throw
+-- StoreError.
+--
+-- Currently a stream partition is a loggroup which only contains one random
+-- logid.
+createStreamPartition
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> Maybe CBytes
+  -> Map CBytes CBytes
+  -> IO FFI.C_LogID
+createStreamPartition client streamid m_key attr = do
+  stream_exist <- doesStreamExist client streamid
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+  if stream_exist
+     then do (log_path, key) <- getStreamLogPath streamid m_key
+             logid <- createRandomLogGroup client log_path def{LD.logAttrsExtras = attr}
+             updateGloLogPathCache streamid key logid
+             pure logid
+     else E.throwStoreError ("No such stream: " <> ZT.pack (showStreamName streamid))
+                            callStack
+#else
+  if stream_exist
+     then do (log_path, _key) <- getStreamLogPath streamid m_key
+             createRandomLogGroup client log_path def{LD.logAttrsExtras = attr}
+     else E.throwStoreError ("No such stream: " <> ZT.pack (showStreamName streamid))
+                            callStack
+#endif
 
 renameStream
   :: HasCallStack
   => FFI.LDClient
-  -> StreamName
-  -- ^ The source path to rename
-  -> StreamName
-  -- ^ The new path you are renaming to
+  -> StreamType
+  -> CBytes
+  -- ^ The source stream name to rename
+  -> CBytes
+  -- ^ The new stream name you are renaming to
   -> IO ()
-renameStream client from to = do
-  LD.syncLogsConfigVersion client =<< LD.renameLogGroup client from to
-  -- FIXME
-  -- Do NOT combine these operations to a atomically one, since we need
-  -- delete the old topic name even the new one is insert failed.
-  m_v <- Cache.lookup' topicNameCache from
-  case m_v of
-    Just x -> do Cache.delete topicNameCache from
-                 Cache.insert topicNameCache to x
-    Nothing -> return ()
+renameStream client streamType srcName destName =
+  _renameStream_ client (mkStreamId streamType srcName) (mkStreamId streamType destName)
 
-removeStream :: HasCallStack => FFI.LDClient -> StreamName -> IO ()
-removeStream client topic = do
-  LD.syncLogsConfigVersion client =<< LD.removeLogGroup client topic
-  Cache.delete topicNameCache topic
+renameStream'
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -- ^ The source stream to rename
+  -> CBytes
+  -- ^ The new stream name you are renaming to
+  -> IO ()
+renameStream' client from destName =
+  _renameStream_ client from (mkStreamId (streamType from) destName)
 
-doesStreamExists :: HasCallStack => FFI.LDClient -> StreamName -> IO Bool
-doesStreamExists client topic = do
-  m_v <- Cache.lookup topicNameCache topic
+_renameStream_ :: HasCallStack => FFI.LDClient -> StreamId -> StreamId -> IO ()
+_renameStream_ client from to = do
+  from' <- getStreamDirPath from
+  to'   <- getStreamDirPath to
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+  modifyMVar_ gloLogPathCache $ \cache -> do
+    m_v <- Cache.lookup' cache from
+    finally (LD.syncLogsConfigVersion client =<< LD.renameLogGroup client from' to')
+            (Cache.delete cache from)
+    forM_ m_v $ Cache.insert cache to
+    pure cache
+#else
+  LD.syncLogsConfigVersion client =<< LD.renameLogGroup client from' to'
+#endif
+{-# INLINABLE _renameStream_ #-}
+
+-- | Archive a stream, then you won't find it by 'findStreams'.
+-- Return the archived stream, so that you can unarchive or remove it.
+--
+-- Note that all operations depend on logid will work as expected.
+archiveStream :: HasCallStack => FFI.LDClient -> StreamId -> IO ArchivedStream
+archiveStream client streamid = do
+  archiveStreamName <- toArchivedStreamName streamid
+  renameStream' client streamid archiveStreamName
+  return $ ArchivedStream archiveStreamName
+
+doesArchivedStreamExist :: HasCallStack => FFI.LDClient -> ArchivedStream -> IO Bool
+doesArchivedStreamExist client (ArchivedStream name) =
+  doesStreamExist client $ StreamId StreamTypeStream name
+
+unArchiveStream
+  :: HasCallStack => FFI.LDClient -> ArchivedStream -> StreamName -> IO ()
+unArchiveStream client (ArchivedStream name) = renameStream client StreamTypeStream name
+
+removeArchivedStream :: HasCallStack => FFI.LDClient -> ArchivedStream -> IO ()
+removeArchivedStream client (ArchivedStream name) =
+  removeStream client $ StreamId StreamTypeStream name
+
+removeStream :: HasCallStack => FFI.LDClient -> StreamId -> IO ()
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+removeStream client streamid = modifyMVar_ gloLogPathCache $ \cache -> do
+  path <- getStreamDirPath streamid
+  finally (LD.syncLogsConfigVersion client =<< LD.removeLogDirectory client path True)
+          (Cache.delete cache streamid)
+  pure cache
+#else
+removeStream client streamid = do
+  path <- getStreamDirPath streamid
+  LD.syncLogsConfigVersion client =<< LD.removeLogDirectory client path True
+#endif
+
+-- | Find all active streams.
+findStreams
+  :: HasCallStack
+  => FFI.LDClient -> StreamType -> IO [StreamId]
+findStreams client streamType = do
+  dir_path <- getStreamDirPath $ mkStreamId streamType ""
+  d <- try $ LD.getLogDirectory client dir_path
+  case d of
+    Left (_ :: E.NOTFOUND) -> return []
+    Right dir -> do
+      ss <- filterM (fmap not . isArchiveStreamName) =<< LD.logDirChildrenNames dir
+      forM ss (pure . mkStreamId streamType)
+
+doesStreamExist :: HasCallStack => FFI.LDClient -> StreamId -> IO Bool
+doesStreamExist client streamid = do
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+  cacheExist <- doesCacheExist streamid
+  if cacheExist
+     then return True
+     else do
+#endif
+        path <- getStreamDirPath streamid
+        r <- try $ LD.getLogDirectory client path
+        case r of
+          Left (_ :: E.NOTFOUND) -> return False
+          Right _                -> return True
+
+listStreamPartitions :: HasCallStack => FFI.LDClient -> StreamId -> IO (Map.Map CBytes FFI.C_LogID)
+listStreamPartitions client streamid = do
+  dir_path <- getStreamDirPath streamid
+  keys <- LD.logDirLogsNames =<< LD.getLogDirectory client dir_path
+  foldrM insertMap Map.empty keys
+  where
+    insertMap key keyMap = do
+      logId <- getUnderlyingLogId client streamid (Just key)
+      return $ Map.insert key logId keyMap
+
+-- Sorted by logid
+listStreamPartitionsOrdered
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> IO (Vector (CBytes, FFI.C_LogID))
+listStreamPartitionsOrdered client streamid = do
+  dir_path <- getStreamDirPath streamid
+  keys <- LD.logDirLogsNames =<< LD.getLogDirectory client dir_path
+  !mvec <- generateFromListM keys $ \key -> do
+    logId <- getUnderlyingLogId client streamid (Just key)
+    pure (key, logId)
+  V.sortBy (\e1 e2 -> compare (snd e1) (snd e2)) mvec
+  V.unsafeFreeze mvec
+
+-- Sorted by log name
+listStreamPartitionsOrderedByName
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> IO (Vector (CBytes, FFI.C_LogID))
+listStreamPartitionsOrderedByName client streamid = do
+  dir_path <- getStreamDirPath streamid
+  keys <- LD.logDirLogsNames =<< LD.getLogDirectory client dir_path
+  !mvec <- generateFromListM keys $ \key -> do
+    logId <- getUnderlyingLogId client streamid (Just key)
+    pure (key, logId)
+  V.sortBy (\e1 e2 -> compare (fst e1) (fst e2)) mvec
+  V.unsafeFreeze mvec
+
+doesStreamPartitionExist
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> Maybe CBytes
+  -> IO Bool
+doesStreamPartitionExist client streamid m_key = do
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+  (logpath, key) <- getStreamLogPath streamid m_key
+  m_v <- getGloLogPathCache streamid key
   case m_v of
     Just _  -> return True
-    Nothing -> do r <- try $ LD.getLogGroup client topic
-                  case r of
-                    Left (_ :: E.NOTFOUND) -> return False
-                    Right group -> do
-                      logid <- fst <$> LD.logGroupGetRange group
-                      Cache.insert topicNameCache topic logid
-                      return True
-
-getCLogIDByStreamName :: FFI.LDClient -> StreamName -> IO FFI.C_LogID
-getCLogIDByStreamName client topic = do
-  m_v <- Cache.lookup topicNameCache topic
-  case m_v of
-    Just v -> return v
     Nothing -> do
-      logid <- fst <$> (LD.logGroupGetRange =<< LD.getLogGroup client topic)
-      Cache.insert topicNameCache topic logid
-      return logid
+      r <- try $ LD.getLogGroup client logpath
+      case r of
+        Left (_ :: E.NOTFOUND) -> return False
+        Right lg               -> do
+          updateGloLogPathCache streamid key . fst =<< LD.logGroupGetRange lg
+          return True
+#else
+  (logpath, _key) <- getStreamLogPath streamid m_key
+  r <- try $ LD.getLogGroup client logpath
+  case r of
+    Left (_ :: E.NOTFOUND) -> return False
+    Right _loggroup        -> return True
+#endif
 
--- | Generate a random logid through a simplify version of snowflake algorithm.
-genRandomLogID :: IO FFI.C_LogID
-genRandomLogID = do
-  let startTS = 1577808000  -- 2020-01-01
-  ts <- getSystemTime'
-  let sec = systemSeconds ts - startTS
-  unless (sec > 0) $ error "Impossible happened, make sure your system time is synchronized."
-  -- 32bit
-  let tsBit :: Int64 = fromIntegral (maxBound :: Word32) .&. sec
-  -- 8bit
-  let tsBit' :: Word32 = shiftR (systemNanoseconds ts) 24
-  -- 16bit
-  rdmBit :: Word16 <- randomRIO (0, maxBound :: Word16)
-  return $ fromIntegral (shiftL tsBit 24)
-       .|. fromIntegral (shiftL tsBit' 16)
-       .|. fromIntegral rdmBit
+doesStreamPartitionValExist
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> FFI.C_LogID
+  -> IO Bool
+doesStreamPartitionValExist client streamid logid = do
+  r <- try $ do
+    dir_path <- getStreamDirPath streamid
+    keys <- LD.logDirLogsNames =<< LD.getLogDirectory client dir_path
+    logids <- forM keys $ getUnderlyingLogId client streamid . Just
+    pure $ logid `elem` logids
+  case r of
+    Left (_ :: E.NOTFOUND) -> return False
+    Right x                -> return x
+
+-------------------------------------------------------------------------------
+-- StreamAttrs
+
+getStreamLogAttrs :: FFI.LDClient -> StreamId -> IO LD.LogAttributes
+getStreamLogAttrs client streamid = do
+  dir_path <- getStreamDirPath streamid
+  dir <- LD.getLogDirectory client dir_path
+  LD.logDirectoryGetAttrs dir
+
+getStreamExtraAttrs :: FFI.LDClient -> StreamId -> IO (Map CBytes CBytes)
+getStreamExtraAttrs client streamid = do
+  dir_path <- getStreamDirPath streamid
+  dir <- LD.getLogDirectory client dir_path
+  LD.logAttrsExtras <$> LD.logDirectoryGetAttrs dir
+
+-- | Update a bunch of extra attrs in the stream, return the old attrs.
+--
+-- If the key does exist, the function will insert the new one.
+updateStreamExtraAttrs
+  :: FFI.LDClient
+  -> StreamId
+  -> Map CBytes CBytes
+  -> IO (Map CBytes CBytes)
+updateStreamExtraAttrs client streamid new_attrs = do
+  dir_path <- getStreamDirPath streamid
+  attrs <- LD.logDirectoryGetAttrsPtr =<< LD.getLogDirectory client dir_path
+  attrs' <- LD.updateLogAttrsExtrasPtr attrs new_attrs
+  withForeignPtr attrs' $
+    LD.syncLogsConfigVersion client <=< LD.ldWriteAttributes client dir_path
+  LD.getAttrsExtrasFromPtr attrs
+
+-- | Approximate milliseconds timestamp of the next record after trim point.
+--
+-- Set to Nothing if there is no records bigger than trim point.
+getStreamPartitionHeadTimestamp
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> Maybe CBytes
+  -> IO (Maybe Int64)
+getStreamPartitionHeadTimestamp client stream m_key = do
+  headAttrs <- LD.getLogHeadAttrs client =<< getUnderlyingLogId client stream m_key
+  ts <- LD.getLogHeadAttrsTrimPointTimestamp headAttrs
+  case ts of
+    FFI.C_MAX_MILLISECONDS -> return Nothing
+    _                      -> return $ Just ts
+
+getStreamPartitionExtraAttrs
+  :: FFI.LDClient
+  -> FFI.C_LogID
+  -> IO (Map CBytes CBytes)
+getStreamPartitionExtraAttrs client logId = do
+   fmap LD.logAttrsExtras <$> LD.logGroupGetAttrs =<< LD.getLogGroupByID client logId
 
 -------------------------------------------------------------------------------
 
-data ProducerRecord = ProducerRecord
-  { dataInTopic     :: StreamName
-  , dataInKey       :: Maybe CBytes
-  , dataInValue     :: Bytes
-  , dataInTimestamp :: Int64
-  } deriving (Show, Generic, JSON.JSON, MP.MessagePack)
+getUnderlyingLogId
+  :: HasCallStack
+  => FFI.LDClient
+  -> StreamId
+  -> Maybe CBytes
+  -> IO FFI.C_LogID
+getUnderlyingLogId client streamid m_key = do
+#ifdef HSTREAM_USE_LOCAL_STREAM_CACHE
+  (log_path, key) <- getStreamLogPath streamid m_key
+  m_logid <- getGloLogPathCache streamid key
+  case m_logid of
+    Nothing -> do
+      logid <- fst <$> (LD.logGroupGetRange =<< LD.getLogGroup client log_path)
+      updateGloLogPathCache streamid key logid
+      pure logid
+    Just ld -> pure ld
+#else
+  (log_path, _key) <- getStreamLogPath streamid m_key
+  fst <$> (LD.logGroupGetRange =<< LD.getLogGroup client log_path)
+#endif
+{-# INLINABLE getUnderlyingLogId #-}
 
-encodeRecord :: ProducerRecord -> Bytes
-encodeRecord = JSON.encode
-
-data ConsumerRecord = ConsumerRecord
-  { dataOutTopic     :: StreamName
-  , dataOutOffset    :: Word64
-  , dataOutKey       :: Maybe CBytes
-  , dataOutValue     :: Bytes
-  , dataOutTimestamp :: Int64
-  } deriving (Show, Generic, JSON.JSON, MP.MessagePack)
-
-decodeRecord :: HasCallStack => FFI.DataRecord -> ConsumerRecord
-decodeRecord FFI.DataRecord{..} = do
-  case JSON.decode' recordPayload of
-    -- TODO
-    Left _err -> error "JSON decode error!"
-    Right ProducerRecord{..} ->
-      ConsumerRecord { dataOutTopic     = dataInTopic
-                     , dataOutOffset    = recordLSN
-                     , dataOutKey       = dataInKey
-                     , dataOutValue     = dataInValue
-                     , dataOutTimestamp = dataInTimestamp
-                     }
-
--- | Appends a new record.
-appendRecord
+getStreamIdFromLogId
   :: HasCallStack
   => FFI.LDClient
   -> FFI.C_LogID
-  -> ProducerRecord
-  -> Maybe (FFI.KeyType, CBytes)
-  -> IO FFI.AppendCallBackData
-appendRecord client logid payload =
-  LD.append client logid (encodeRecord payload)
+  -> IO (StreamId, Maybe CBytes)
+getStreamIdFromLogId client logid = do
+  -- e.g. /hstream/stream/some_stream/some_key
+  logpath <- fmap thawToPosixPath . LD.logGroupGetFullName =<< LD.getLogGroupByID client logid
+  -- e.g. /hstream/stream/some_stream, some_key
+  let (logdir, key) = bimap P.dropTrailingPathSeparator thawFromPosixPath $
+                        P.splitFileName logpath
+  -- e.g. /hstream/stream, some_stream
+  let (dir, name) = bimap (fromPosixPath . P.dropTrailingPathSeparator) thawFromPosixPath $
+                      P.splitFileName logdir
+  s <- readIORef gloStreamSettings
+  streamid <- if | dir == streamNameLogDir s -> pure $ mkStreamId StreamTypeStream name
+                 | dir == streamViewLogDir s -> pure $ mkStreamId StreamTypeView name
+                 | dir == streamTempLogDir s -> pure $ mkStreamId StreamTypeTemp name
+                 | dir == streamTopicLogDir s -> pure $ mkStreamId StreamTypeTopic name
+                 | otherwise -> E.throwStoreError (ZB.buildText $ "Unknown logid " <> ZB.int logid) callStack
+  let key_ = if key == streamDefaultKey s then Nothing else Just key
+  pure (streamid, key_)
 
-readerReadRecord :: FFI.LDReader -> Int -> IO [ConsumerRecord]
-readerReadRecord reader maxlen = map decodeRecord <$> LD.readerRead reader maxlen
+-------------------------------------------------------------------------------
+--  Checkpoint Store
+
+-- | Try to set logid for checkpoint store.
+--
+-- idx: 63...56...0
+--      |    |    |
+-- bit: 00...1...00
+initCheckpointStoreLogID :: FFI.LDClient -> LD.LogAttributes -> IO FFI.C_LogID
+initCheckpointStoreLogID client attrs = do
+  -- NOTE: first get and then create is NOT suitable for multiple concurrent
+  -- server. So here we use makeLogGroup directly and handle EXISTS exception.
+  r <- try $ LD.makeLogGroup client "/hstream/internal/checkpoint"
+                             checkpointStoreLogID checkpointStoreLogID
+                             attrs True
+  case r of
+    Left (_ :: E.EXISTS) -> return checkpointStoreLogID
+    Right _              -> return checkpointStoreLogID
+
+-- logid greater or equal than (bit 56) is reserved for internal use.
+checkpointStoreLogID :: FFI.C_LogID
+checkpointStoreLogID = bit 56
+
+initSubscrCheckpointDir :: FFI.LDClient -> LD.LogAttributes -> IO ()
+initSubscrCheckpointDir client =
+  initCheckpointDir client subscriptionCheckpointDir
+
+allocSubscrCheckpointId :: FFI.LDClient -> CBytes -> IO FFI.C_LogID
+allocSubscrCheckpointId client =
+  allocCheckpointId client subscriptionCheckpointDir
+
+freeSubscrCheckpointId :: FFI.LDClient -> CBytes -> IO ()
+freeSubscrCheckpointId client =
+  freeCheckpointId client subscriptionCheckpointDir
+
+-- Prefer to using 'allocSubscrCheckpointId' instead
+getSubscrCheckpointId :: HasCallStack => FFI.LDClient -> CBytes -> IO FFI.C_LogID
+getSubscrCheckpointId client = getCheckpointId client subscriptionCheckpointDir
+
+initOffsetCheckpointDir :: FFI.LDClient -> LD.LogAttributes -> IO ()
+initOffsetCheckpointDir client = initCheckpointDir client offsetCheckpointDir
+
+allocOffsetCheckpointId :: FFI.LDClient -> CBytes -> IO FFI.C_LogID
+allocOffsetCheckpointId client = allocCheckpointId client offsetCheckpointDir
+
+freeOffsetCheckpointId :: FFI.LDClient -> CBytes -> IO ()
+freeOffsetCheckpointId client = freeCheckpointId client offsetCheckpointDir
+
+initCheckpointDir :: FFI.LDClient -> CBytes -> LD.LogAttributes -> IO ()
+initCheckpointDir client dir attrs = catch f (\(_ :: E.EXISTS) -> return ())
+  where
+    f = do
+      logdir <- LD.makeLogDirectory client dir attrs True
+      LD.syncLogsConfigVersion client =<< LD.logDirectoryGetVersion logdir
+
+allocCheckpointId :: FFI.LDClient -> CBytes -> CBytes -> IO FFI.C_LogID
+allocCheckpointId client dir key = do
+  r <- try $ getCheckpointId client dir key
+  case r of
+    Left (_ :: E.NOTFOUND) ->
+      createRandomLogGroup client (dir <> "/" <> key) def
+    Right logid -> return logid
+
+-- Prefer to using 'allocSubscrCheckpointId' instead
+getCheckpointId :: HasCallStack => FFI.LDClient -> CBytes-> CBytes -> IO FFI.C_LogID
+getCheckpointId client dir key = do
+  let logpath = dir <> "/" <> key
+  fst <$> (LD.logGroupGetRange =<< LD.getLogGroup client logpath)
+
+deleteCheckpointId :: FFI.LDClient -> CBytes -> CBytes -> IO ()
+deleteCheckpointId client dir key = do
+  let logpath = dir <> "/" <> key
+  LD.syncLogsConfigVersion client =<< LD.removeLogGroup client logpath
+
+freeCheckpointId :: FFI.LDClient -> CBytes -> CBytes -> IO ()
+freeCheckpointId client dir key = do
+  catch (deleteCheckpointId client dir key) $ \(_ :: E.NOTFOUND) -> do
+    Log.warning $ "freeCheckpointId NotFound: " <> Log.buildString' key
+    return ()
+
+-------------------------------------------------------------------------------
+-- Reader
 
 newLDFileCkpReader
   :: FFI.LDClient
@@ -232,20 +807,18 @@ newLDFileCkpReader
   -> Maybe Int64
   -- ^ specify the read buffer size for this client, fallback
   -- to the value in settings if it is Nothing.
-  -> Word32
-  -- ^ The number of retries when synchronously writing checkpoints.
   -> IO FFI.LDSyncCkpReader
-newLDFileCkpReader client name root_path max_logs m_buffer_size retries = do
+newLDFileCkpReader client name root_path max_logs m_buffer_size = do
   store <- LD.newFileBasedCheckpointStore root_path
   reader <- LD.newLDReader client max_logs m_buffer_size
-  LD.newLDSyncCkpReader name reader store retries
+  LD.newLDSyncCkpReader name reader store
 
 newLDRsmCkpReader
   :: FFI.LDClient
   -> CBytes
   -- ^ CheckpointedReader name
   -> FFI.C_LogID
-  -- ^ checkpointStore logid
+  -- ^ checkpointStore logid, this should be 'checkpointStoreLogID'.
   -> Int64
   -- ^ Timeout for the RSM to stop after calling shutdown, in milliseconds.
   -> CSize
@@ -254,14 +827,29 @@ newLDRsmCkpReader
   -> Maybe Int64
   -- ^ specify the read buffer size for this client, fallback
   -- to the value in settings if it is Nothing.
-  -> Word32
-  -- ^ The number of retries when synchronously writing checkpoints.
   -> IO FFI.LDSyncCkpReader
-newLDRsmCkpReader client name logid timeout max_logs m_buffer_size retries = do
+newLDRsmCkpReader client name logid timeout max_logs m_buffer_size = do
   store <- LD.newRSMBasedCheckpointStore client logid timeout
   reader <- LD.newLDReader client max_logs m_buffer_size
-  LD.newLDSyncCkpReader name reader store retries
+  LD.newLDSyncCkpReader name reader store
 
+newLDRsmCkpReader'
+  :: FFI.LDClient
+  -> CBytes
+  -- ^ CheckpointedReader name
+  -> FFI.LDCheckpointStore
+  -> CSize
+  -- ^ maximum number of logs that can be read from
+  -- this Reader at the same time
+  -> Maybe Int64
+  -- ^ specify the read buffer size for this client, fallback
+  -- to the value in settings if it is Nothing.
+  -> IO FFI.LDSyncCkpReader
+newLDRsmCkpReader' client name store max_logs m_buffer_size = do
+  reader <- LD.newLDReader client max_logs m_buffer_size
+  LD.newLDSyncCkpReader name reader store
+
+-- TODO: remove
 newLDZkCkpReader
   :: FFI.LDClient
   -> CBytes
@@ -272,20 +860,124 @@ newLDZkCkpReader
   -> Maybe Int64
   -- ^ specify the read buffer size for this client, fallback
   -- to the value in settings if it is Nothing.
-  -> Word32
-  -- ^ The number of retries when synchronously writing checkpoints.
   -> IO FFI.LDSyncCkpReader
-newLDZkCkpReader client name max_logs m_buffer_size retries = do
+newLDZkCkpReader client name max_logs m_buffer_size = do
   store <- LD.newZookeeperBasedCheckpointStore client
   reader <- LD.newLDReader client max_logs m_buffer_size
-  LD.newLDSyncCkpReader name reader store retries
+  LD.newLDSyncCkpReader name reader store
 
-stopReader :: FFI.LDClient -> FFI.LDReader -> CBytes -> IO ()
-stopReader client reader name = do
-  logid <- getCLogIDByStreamName client name
-  LD.readerStopReading reader logid
+-------------------------------------------------------------------------------
+-- internal helpers
 
-stopCkpReader :: FFI.LDClient -> FFI.LDSyncCkpReader -> CBytes -> IO ()
-stopCkpReader client reader name = do
-  logid <- getCLogIDByStreamName client name
-  LD.ckpReaderStopReading reader logid
+createRandomLogGroup
+  :: HasCallStack
+  => FFI.LDClient
+  -> CBytes
+  -> LD.LogAttributes
+  -> IO FFI.C_LogID
+createRandomLogGroup client logPath attrs = go 10
+  where
+    go :: Int -> IO FFI.C_LogID
+    go maxTries =
+      if maxTries <= 0
+         then E.throwStoreError "Ran out all retries, but still failed :(" callStack
+         else do
+           logid <- genUnique
+           result <- try $ LD.makeLogGroup client logPath logid logid attrs True
+           case result of
+             Right group -> do
+               LD.syncLogsConfigVersion client =<< LD.logGroupGetVersion group
+               return logid
+             Left (_ :: E.ID_CLASH) -> do
+               Log.warning "LogDevice ID_CLASH!"
+               go $! maxTries - 1
+{-# INLINABLE createRandomLogGroup #-}
+
+getStreamDirPath :: StreamId -> IO CBytes
+getStreamDirPath StreamId{..} = do
+  s <- readIORef gloStreamSettings
+  case streamType of
+    StreamTypeStream -> pure $ t2 P.combine (streamNameLogDir s) streamName
+    StreamTypeView   -> pure $ t2 P.combine (streamViewLogDir s) streamName
+    StreamTypeTemp   -> pure $ t2 P.combine (streamTempLogDir s) streamName
+    StreamTypeTopic  -> pure $ t2 P.combine (streamTopicLogDir s) streamName
+{-# INLINABLE getStreamDirPath #-}
+
+getStreamLogPath :: StreamId -> Maybe CBytes -> IO (CBytes, CBytes)
+getStreamLogPath streamid m_key = do
+  s <- readIORef gloStreamSettings
+  dir_path <- getStreamDirPath streamid
+  let key_name = case m_key of
+       Just ""  -> streamDefaultKey s
+       Just key -> key
+       Nothing  -> streamDefaultKey s
+  let full_path = t2 P.combine dir_path key_name
+  pure (full_path, key_name)
+{-# INLINABLE getStreamLogPath #-}
+
+-------------------------------------------------------------------------------
+
+#if !MIN_VERSION_filepath(1, 4, 100)
+t2 :: (String -> String -> String) -> CBytes -> CBytes -> CBytes
+t2 f a1 a2 = fromPosixPath $ f (toPosixPath a1) (toPosixPath a2)
+
+fromPosixPath :: String -> StreamName
+fromPosixPath = CBytes.pack
+{-# INLINABLE fromPosixPath #-}
+
+thawFromPosixPath :: String -> StreamName
+thawFromPosixPath = fromPosixPath
+{-# INLINABLE thawFromPosixPath #-}
+
+toPosixPath :: StreamName -> String
+toPosixPath = CBytes.unpack
+{-# INLINABLE toPosixPath #-}
+
+thawToPosixPath :: StreamName -> String
+thawToPosixPath = toPosixPath
+{-# INLINABLE thawToPosixPath #-}
+
+#else
+
+-- TODO: All use ShortByteString instead of CBytes
+
+t2 :: (P.PosixString -> P.PosixString -> P.PosixString) -> CBytes -> CBytes -> CBytes
+t2 f a1 a2 = fromPosixPath $ f (toPosixPath a1) (toPosixPath a2)
+
+fromPosixPath :: P.PosixString -> StreamName
+fromPosixPath (P.PosixString sbs) = sbs2cbytes sbs
+{-# INLINABLE fromPosixPath #-}
+
+thawFromPosixPath :: P.PosixString -> StreamName
+thawFromPosixPath (P.PosixString sbs) = sbs2cbytesUnsafe sbs
+{-# INLINABLE thawFromPosixPath #-}
+
+toPosixPath :: StreamName -> P.PosixPath
+toPosixPath name = P.PosixString (cbytes2sbs name)
+{-# INLINABLE toPosixPath #-}
+
+thawToPosixPath :: StreamName -> P.PosixPath
+thawToPosixPath name = P.PosixString (cbytes2sbsUnsafe name)
+{-# INLINABLE thawToPosixPath #-}
+#endif
+
+-- Variant of 'VGM.generateM'
+--
+-- https://hackage.haskell.org/package/vector-0.13.0.0/docs/Data-Vector-Generic-Mutable.html#v:generateM
+generateFromListM
+  :: (PrimMonad m, VGM.MVector v b)
+  => [a] -> (a -> m b) -> m (v (PrimState m) b)
+generateFromListM es f
+  | length es <= 0 = VGM.new 0
+  | otherwise = do
+      let n = length es
+      vec <- VGM.new n
+      let loop (i, xs) | i >= n    = return vec
+                       | otherwise = do VGM.unsafeWrite vec i =<< f (head xs)
+                                        loop (i + 1, tail xs)
+      loop (0, es)
+{-# INLINE generateFromListM #-}
+
+-------------------------------------------------------------------------------
+
+#undef HSTREAM_USE_LOCAL_STREAM_CACHE

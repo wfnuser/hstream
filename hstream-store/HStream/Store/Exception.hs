@@ -11,7 +11,6 @@ module HStream.Store.Exception
   , throwStreamError
   , throwStreamErrorIfNotOK
   , throwStreamErrorIfNotOK'
-  , throwStoreError
 
     -- * Custom Errors
   , SubmitError (..)
@@ -20,6 +19,7 @@ module HStream.Store.Exception
 
     -- * General Store Exception
   , StoreError               (..)
+  , throwStoreError
     -- ** Specific Stream Exception
   , NOTFOUND                 (..)
   , TIMEDOUT                 (..)
@@ -234,6 +234,11 @@ module HStream.Store.Exception
   , pattern C_WRITE_STREAM_UNKNOWN
   , pattern C_WRITE_STREAM_BROKEN
   , pattern C_WRITE_STREAM_IGNORED
+
+  -- * Auxiliary functions
+  , isNOTFOUND
+  , isEXISTS
+  , isTOOBIG
   ) where
 
 import           Control.Exception            (Exception (..))
@@ -260,7 +265,8 @@ instance Show SomeHStoreException where
 instance T.Print SomeHStoreException where
   toUTF8BuilderP _ (SomeHStoreException e) = fromString $ show e
 
-instance E.Exception SomeHStoreException
+instance E.Exception SomeHStoreException where
+  displayException (SomeHStoreException e) = displayException e
 
 someHStoreExceptionToException :: E.Exception e => e -> E.SomeException
 someHStoreExceptionToException = E.toException . SomeHStoreException
@@ -290,16 +296,18 @@ instance T.Print SSEInfo where
 instance Show SSEInfo where
   show = T.toString
 
-#define MAKE_SSE(e) \
-newtype e = e SSEInfo deriving (Show); \
-instance Exception e where                         \
-{ toException = someHStoreExceptionToException;    \
-  fromException = someHStoreExceptionFromException \
+#define MAKE_SSE(e)                                                            \
+newtype e = e SSEInfo deriving (Show);                                         \
+instance Exception e where                                                     \
+{ toException = someHStoreExceptionToException;                                \
+  fromException = someHStoreExceptionFromException;                            \
+  displayException (e SSEInfo{..}) = T.toString sseDescription;                \
 }
-#define MAKE_THROW_SSE(c, e) \
-throwStreamError c stack = do \
-  name <- T.validate <$> Z.fromNullTerminated (c_show_error_name c); \
-  desc <- T.validate <$> Z.fromNullTerminated (c_show_error_description c); \
+
+#define MAKE_THROW_SSE(c, e)                                                   \
+throwStreamError c stack = do                                                  \
+  name <- T.validate <$> Z.fromNullTerminated (c_show_error_name c);           \
+  desc <- T.validate <$> Z.fromNullTerminated (c_show_error_description c);    \
   E.throwIO $ e (SSEInfo name desc stack)
 
 MAKE_SSE(NOTFOUND         )
@@ -568,9 +576,20 @@ instance Exception SubmitError where
 throwSubmitError :: CallStack -> IO a
 throwSubmitError = E.throwIO . SubmitError "submit error"
 
-throwSubmitIfNotOK :: CallStack -> Int  -> IO Int
-throwSubmitIfNotOK stack ret = if ret == 0 then return 0 else throwSubmitError stack
+throwSubmitIfNotOK :: HasCallStack => Int -> IO Int
+throwSubmitIfNotOK ret = if ret == 0 then return 0 else throwSubmitError callStack
 
 throwStoreError :: T.Text -> CallStack -> IO a
 throwStoreError desc stack =
   E.throwIO $ StoreError (SSEInfo "1000" desc stack)
+
+-------------------------------------------------------------------------------
+
+isNOTFOUND :: NOTFOUND -> Bool
+isNOTFOUND = const True
+
+isEXISTS :: EXISTS -> Bool
+isEXISTS = const True
+
+isTOOBIG :: TOOBIG -> Bool
+isTOOBIG = const True

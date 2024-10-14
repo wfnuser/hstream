@@ -1,74 +1,221 @@
 cabal-version:      2.2
 name:               hstream-sql
 version:            0.1.0.0
-synopsis:           High performance stream processing platform for IoT data written in Haskell.
-description:        Please see the README on Github at
-                    <https://github.com/hstream-io/hstream#readme>
+synopsis:
+  High performance stream processing platform for IoT data written in Haskell.
+
+description:
+  Please see the README on GitHub at
+  <https://github.com/hstream-io/hstream#readme>
+
 license:            BSD-3-Clause
 license-file:       LICENSE
 copyright:          Copyright (c) 2020 EMQ Technologies Co., Ltd.
 author:             Feng Lee <feng@emqx.io>
 maintainer:         maosics@gmail.com
-tested-with:        GHC == 8.10.4, GHC == 8.8.4
+tested-with:        GHC ==8.10.4
 category:           Language
 homepage:           https://github.com/hstream-io/hstream
 bug-reports:        https://github.com/hstream-io/hstream/issues
 build-type:         Simple
-extra-source-files: ChangeLog.md
-                    README.md
+extra-source-files:
+  ChangeLog.md
+  README.md
 
 source-repository head
   type:     git
   location: https://github.com/hstreamdb/hstream
 
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
+
+flag hstream_use_v2_engine
+  default:     False
+  description: Use v2 processing engine
+
+flag hstream_enable_schema
+  default:     False
+  description:
+    Save schema with streams and enable schema-related pipelines
+
+common shared-properties
+  ghc-options:
+    -Wall -Wextra -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
+
+  if flag(hstream_use_v2_engine)
+    cpp-options: -DHStreamUseV2Engine
+
+  if flag(hstream_enable_schema)
+    cpp-options: -DHStreamEnableSchema
+
 library
-  exposed-modules:  HStream.SQL
-                    HStream.SQL.AST
-                    HStream.SQL.Abs
-                    HStream.SQL.Exception
-                    HStream.SQL.Parse
-                    HStream.SQL.Codegen
-  other-modules:    HStream.SQL.ErrM
-                    HStream.SQL.Extra
-                    HStream.SQL.Lex
-                    HStream.SQL.Par
-                    HStream.SQL.Preprocess
-                    HStream.SQL.Print
-                    HStream.SQL.Validate
-                    HStream.SQL.Validate.Utils
-                    HStream.SQL.Codegen.Boilerplate
-                    HStream.SQL.Codegen.Utils
-  hs-source-dirs:   src
-  build-depends:    base       >= 4.11 && < 5
-                  , aeson
-                  , array
-                  , binary
-                  , bytestring ^>= 0.10
-                  , extra
-                  , text       ^>= 1.2
-                  , time       >= 1.9.1 && < 2
-                  , scientific
-                  , string-random
-                  , hstream-processing
-                  , rio
-                  , unordered-containers
-  default-language: Haskell2010
-  ghc-options:      -Wall -Wcompat -Widentities -Wincomplete-record-updates
-                    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+  import:             shared-properties
+  exposed-modules:
+    HStream.SQL
+    HStream.SQL.Abs
+    HStream.SQL.AST
+    HStream.SQL.Binder
+    HStream.SQL.Binder.Basic
+    HStream.SQL.Binder.Common
+    HStream.SQL.Binder.DDL
+    HStream.SQL.Binder.DML
+    HStream.SQL.Binder.Operator
+    HStream.SQL.Binder.Select
+    HStream.SQL.Binder.SQL
+    HStream.SQL.Binder.ValueExpr
+    HStream.SQL.Codegen.AggOp
+    HStream.SQL.Codegen.BinOp
+    HStream.SQL.Codegen.Cast
+    HStream.SQL.Codegen.ColumnCatalog
+    HStream.SQL.Codegen.ColumnCatalogNew
+    HStream.SQL.Codegen.Common
+    HStream.SQL.Codegen.CommonNew
+    HStream.SQL.Codegen.JsonOp
+    HStream.SQL.Codegen.TerOp
+    HStream.SQL.Codegen.UnaryOp
+    HStream.SQL.Codegen.Utils
+    HStream.SQL.Codegen.V1
+    HStream.SQL.Codegen.V1.Boilerplate
+    HStream.SQL.Codegen.V1New
+    HStream.SQL.Codegen.V1New.Boilerplate
+    HStream.SQL.Codegen.V2
+    HStream.SQL.Exception
+    HStream.SQL.Internal.Check
+    HStream.SQL.Internal.Validate
+    HStream.SQL.Parse
+    HStream.SQL.ParseNew
+    HStream.SQL.Planner
+    HStream.SQL.Planner.Pretty
+    HStream.SQL.PlannerNew
+    HStream.SQL.PlannerNew.Expr
+    HStream.SQL.PlannerNew.Extra
+    HStream.SQL.PlannerNew.Pretty
+    HStream.SQL.PlannerNew.Types
+    HStream.SQL.Rts
+    HStream.SQL.Rts.New
+    HStream.SQL.Rts.Old
 
-executable sql-example-mock
-  main-is:          Example.hs
-  hs-source-dirs:   sql-example-mock
-  build-depends:    base
-                  , aeson
-                  , hstream-processing
-                  , hstream-sql
-                  , random
-                  , rio
-                  , scientific
-                  , text
-                  , unordered-containers
-  default-language: Haskell2010
-  ghc-options:      -Wall -Wcompat -Widentities -Wincomplete-record-updates -threaded
-                    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+  other-modules:
+    HStream.SQL.ErrM
+    HStream.SQL.Extra
+    HStream.SQL.Lex
+    HStream.SQL.Par
+    HStream.SQL.Preprocess
+    HStream.SQL.Print
+    HStream.SQL.Validate.Utils
 
+  hs-source-dirs:     src gen-sql app
+  build-depends:
+    , aeson
+    , array
+    , base                  >=4.11  && <5
+    , bimap
+    , binary
+    , bytestring
+    , containers
+    , data-default
+    , diff-flow
+    , extra
+    , hashable
+    , hstream-common
+    , hstream-common-base
+    , hstream-processing
+    , mtl
+    , prettyprinter         ^>=1.6
+    , proto3-suite
+    , rio
+    , scientific
+    , string-random
+    , text
+    , time                  >=1.9.1 && <2
+    , time-compat
+    , unordered-containers
+    , uuid
+    , vector
+    , Z-Data
+
+  -- Note: build on osx may require this
+  build-tool-depends:
+    , alex:alex    ^>=3.2.7.1
+    , happy:happy
+
+  default-language:   Haskell2010
+
+-- test-suite hstream-sql-test
+--   import:             shared-properties
+--   type:               exitcode-stdio-1.0
+--   main-is:            Spec.hs
+--   other-modules:
+--     HStream.SQL.Codegen.ArraySpec
+--     HStream.SQL.Codegen.MathSpec
+--     HStream.SQL.ParseRefineSpec
+--     HStream.SQL.ValidateSpec
+--
+--   hs-source-dirs:     test
+--   build-depends:
+--     , aeson
+--     , base                  >=4.11 && <5
+--     , bytestring
+--     , containers
+--     , hspec
+--     , hstream-common
+--     , hstream-sql
+--     , HUnit
+--     , random                ^>=1.2
+--     , scientific
+--     , text
+--     , unordered-containers
+--     , vector
+--     , Z-Data
+--
+--   default-language:   Haskell2010
+--   build-tool-depends: hspec-discover:hspec-discover ==2.*
+--   ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+--
+
+executable syntax-test-runner
+  import:           shared-properties
+  main-is:          SyntaxTestRunner.hs
+  hs-source-dirs:   app
+  other-modules:    Lib
+  build-depends:
+    , aeson
+    , base
+    , bytestring
+    , containers
+    , hstream-sql
+    , optparse-applicative
+    , text
+    , vector
+    , yaml
+
+  default-language: GHC2021
+  ghc-options:      -Wall -Wextra
+
+executable plan-test-runner
+  import:           shared-properties
+  main-is:          PlanTestRunner.hs
+  hs-source-dirs:   app
+  other-modules:    Lib
+  build-depends:
+    , aeson
+    , base
+    , bytestring
+    , containers
+    , hstream-sql
+    , optparse-applicative
+    , text
+    , vector
+    , yaml
+
+  default-language: GHC2021
+  ghc-options:      -Wall -Wextra

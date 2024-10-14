@@ -1,0 +1,255 @@
+cabal-version:      2.4
+name:               hstream-common
+version:            0.1.0.0
+synopsis:
+  High performance stream processing platform for IoT data written in Haskell.
+
+description:
+  Please see the README on GitHub at
+  <https://github.com/hstreamdb/hstream#readme>
+
+license:            BSD-3-Clause
+license-file:       LICENSE
+copyright:          Copyright (c) 2020 EMQ Technologies Co., Ltd.
+author:             Feng Lee <feng@emqx.io>
+maintainer:         lambda@emqx.io, wangbin@emqx.io, comonad@emqx.io
+tested-with:        GHC ==8.10.4
+category:           Database
+homepage:           https://github.com/hstreamdb/hstream
+bug-reports:        https://github.com/hstreamdb/hstream/issues
+build-type:         Custom
+extra-source-files:
+  cbits/**/*.h
+  include/**/*.h
+
+custom-setup
+  setup-depends:
+    , base   >=4.5 && <5
+    , Cabal  >=2.4 && <4
+
+source-repository head
+  type:     git
+  location: https://github.com/hstreamdb/hstream
+
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
+
+common shared-properties
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
+
+library
+  import:             shared-properties
+  exposed-modules:
+    HStream.Common.CliParsers
+    HStream.Common.ConsistentHashing
+    HStream.Common.GrpcHaskell
+    HStream.Common.Query
+    HStream.Common.Types
+    HStream.Common.ZookeeperClient
+    HStream.Common.ZookeeperSlotAlloc
+    HStream.Exception
+    HStream.Instances
+    HStream.MetaStore.FileUtils
+    HStream.MetaStore.RqliteUtils
+    HStream.MetaStore.Types
+    HStream.MetaStore.ZookeeperUtils
+    HStream.Utils
+    HStream.Utils.Aeson
+    HStream.Utils.Validation
+
+  other-modules:
+    HStream.Utils.BuildRecord
+    HStream.Utils.Codec
+    HStream.Utils.Common
+    HStream.Utils.Compression
+    HStream.Utils.Converter
+    HStream.Utils.Format
+    HStream.Utils.JSON
+    HStream.Utils.RPC
+    HStream.Utils.Time
+    HStream.Version
+
+  hs-source-dirs:     .
+  include-dirs:       . include /usr/local/include
+  install-includes:
+    cbits/query/Table.h
+    cbits/query/tables/AdminCommandTable.h
+
+  cxx-sources:
+    cbits/hash.cpp
+    cbits/hs_zookeeper_client.cpp
+    cbits/query/tables/AdminCommandTable.cpp
+    cbits/query.cpp
+
+  build-tool-depends:
+    , cpphs:cpphs    ^>=1.20
+    , hsc2hs:hsc2hs
+
+  build-depends:
+    , aeson                 >=1.5   && <2.0 || ^>=2.1
+    , ansi-terminal
+    , async
+    , attoparsec
+    , base                  >=4.11  && <5
+    , bytestring
+    , casing                >=0.1.4
+    , containers
+    , cryptonite
+    , data-default
+    , deepseq
+    , digest
+    , filelock
+    , ghc-prim              >=0.5   && <1.0
+    , grpc-haskell
+    , grpc-haskell-core
+    , hashable
+    , hs-grpc-server
+    , hstream-api-hs
+    , hstream-client-cpp
+    , hstream-common-base
+    , http-client
+    , http-types
+    , memory
+    , optparse-applicative
+    , primitive             ^>=0.7
+    , proto3-suite
+    , proto3-wire
+    , random
+    , raw-strings-qq
+    , scientific
+    , swagger2
+    , table-layout
+    , text
+    , time
+    , unordered-containers
+    , vector
+    , Z-Data
+    , zlib
+    , zoovisitor
+    , zstd
+
+  cxx-options:        -std=c++17
+  cpp-options:        -std=c++17
+  extra-lib-dirs:     /usr/local/lib
+  extra-libraries:
+    stdc++
+    atomic
+    grpc++
+    gpr
+    grpc++_reflection
+    protobuf
+    folly
+    logdevice
+    ldquery
+    glog
+    boost_context
+
+  default-language:   Haskell2010
+  default-extensions:
+    EmptyDataDeriving
+    GADTSyntax
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+    UnliftedNewtypes
+
+test-suite hstream-common-test
+  import:             shared-properties
+  type:               exitcode-stdio-1.0
+  main-is:            Spec.hs
+  hs-source-dirs:     test
+  other-modules:
+    HStream.CodecSpec
+    HStream.ConsistentHashingSpec
+    HStream.ExceptionSpec
+    HStream.MetaStoreSpec
+    HStream.RqliteUtilsSpec
+    HStream.TestUtils
+    HStream.UtilsSpec
+    HStream.ValidationSpec
+    HStream.ZookeeperSlotAllocSpec
+
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , bytestring
+    , containers            ^>=0.6
+    , directory
+    , hspec
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , http-client
+    , proto3-suite
+    , QuickCheck
+    , random                ^>=1.2
+    , text
+    , unordered-containers
+    , vector
+    , Z-Data
+    , zoovisitor
+
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+
+  default-language:   Haskell2010
+  build-tool-depends: hspec-discover:hspec-discover >=2 && <3
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N
+
+benchmark codec-bench
+  import:             shared-properties
+  type:               exitcode-stdio-1.0
+  main-is:            Bench.hs
+  hs-source-dirs:     bench
+  other-modules:
+    CodecBench
+    CompresstionBench
+    Util
+
+  build-depends:
+    , base            >=4.11 && <5
+    , bytestring
+    , criterion
+    , hstream-api-hs
+    , hstream-common
+    , proto3-suite
+    , random          ^>=1.2
+    , vector
+
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+  default-language:   Haskell2010
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N

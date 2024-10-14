@@ -1,0 +1,1756 @@
+#!/usr/bin/env python3
+# PYTHON_ARGCOMPLETE_OK
+#
+# If you want to enable tab completion of this script, you must install
+# argcomplete, for details, see:
+#
+# https://kislyuk.github.io/argcomplete/#installation
+import argparse
+import json
+import os
+import getpass
+import subprocess
+from pathlib import Path
+
+from typing import List, Optional, Tuple, Union, Dict, Any
+
+logerr = lambda s: print(f"\033[91m{s}\033[0m")
+logdebug = lambda s: print(f"\033[95m[DEBUG] \033[0m{s}")
+loginfo = lambda s: print(f"\033[96m{s}\033[0m")
+logwarn = lambda s: print(f"\033[33m{s}\033[0m")
+
+try:
+    import argcomplete
+except Exception:
+    from unittest.mock import MagicMock
+
+    argcomplete = MagicMock()
+    argcomplete.autocomplete = lambda x: logwarn(
+        "There is no tab completion supported since no argcomplete found!"
+    )
+
+HOME = os.getenv("HOME")
+CUID, CGID = os.getuid(), os.getgid()
+CUSERNAME = getpass.getuser()
+CWD = os.getcwd()
+
+PROJECT_ROOT = os.path.dirname(
+    os.path.dirname(os.path.realpath(os.path.abspath(__file__)))
+)
+DEFAULT_DEPLOY_CONF = os.path.join(PROJECT_ROOT, "script/dev_deploy_conf.json")
+DEFAULT_CONTAINER_CONFIG_PATH = "/etc/hstream/config.yaml"
+
+
+def run_sh(
+    sh, stderr=subprocess.STDOUT, stdout=None, check=True, print_cmd=False
+):
+    if sh:
+        if print_cmd:
+            loginfo(f"Run command: <{sh}>")
+        if isinstance(sh, str):
+            args = ["bash", "-c", sh]
+            return subprocess.run(
+                args, stderr=stderr, stdout=stdout, check=check
+            )
+        elif isinstance(sh, list):
+            return subprocess.run(
+                sh, shell=True, stderr=stderr, stdout=stdout, check=check
+            )
+        else:
+            raise ValueError(f"Invalid sh: {sh}")
+
+
+def wait_tcp_sh(port, host="127.0.0.1", timeout=20):
+    return (
+        f'set -e && export timeout="{timeout}" && '
+        f"until (echo -n > /dev/tcp/{host}/{port}); do"
+        f'  >&2 echo "Waiting for {host}:{port} ...";'
+        "   sleep 1;"
+        "   timeout=$((timeout - 1));"
+        '   if [ $timeout -le 0 ]; then echo "Timeout!" && exit 1; fi;'
+        "done"
+    )
+
+
+def is_container_running(remote, container_name, container_bin="docker"):
+    if not container_bin:
+        return logerr("No such container_bin")
+    result = run_sh(
+        f"ssh {remote} '{container_bin} " "ps --format {{.Names}}'",
+        stdout=subprocess.PIPE,
+    )
+    if result and result.stdout:
+        rs = result.stdout.decode().strip().split("\n")
+        if container_name.strip() in rs:
+            return True
+    return False
+
+
+def scp_command(local_file, remote, remote_file) -> str:
+    cmd = ""
+    file_dir = os.path.dirname(remote_file)
+    if file_dir != "":
+        cmd += f"ssh {remote} 'mkdir -p {file_dir}' && "
+    cmd += f"scp -r {local_file} {remote}:{file_dir}"
+    return cmd
+
+
+def set_rm_intermediate(rm: bool) -> str:
+    return " --rm " if rm else ""
+
+
+def set_config_path(custom: str, origin: str) -> str:
+    return f" -v {custom}:{origin} "
+
+
+def set_resource_constraints(memory_cpus: Tuple[str, str]) -> str:
+    memory, cpus = memory_cpus
+    return (
+        f" --memory={memory} "
+        if memory
+        else "" f" --cpus={cpus} "
+        if cpus
+        else ""
+    )
+
+
+def synchronize_configs(
+    local_config_path: str,
+    remote_config_path: str,
+    hosts: List[Tuple[str, str]],
+) -> List[str]:
+    cmds = []
+    if local_config_path is not None:
+        assert remote_config_path is not None
+        for (remote, _) in hosts:
+            cmds.append(
+                scp_command(local_config_path, remote, remote_config_path)
+            )
+    return cmds
+
+
+def set_restart(restart: bool) -> str:
+    return " --restart unless-stopped " if restart else ""
+
+
+# -----------------------------------------------------------------------------
+
+
+class Service:
+    _commands = {}
+
+    def __init__(self, parser):
+        self._parser = parser
+        self._parser.add_argument("--container-bin", default="docker")
+        self._parser.add_argument(
+            "--remote",
+            type=str,
+            help="comma separated remote (host,local_address) pairs, e.g. server1:10.100.0.1,server2:10.100.0.2",
+        )
+        self._cmdparsers = parser.add_subparsers(
+            title="Commands",
+            dest="sub_command",
+        )
+        self._args = {}
+
+    def register(self, SubService):
+        s = SubService(self._cmdparsers)
+        s.init_parser()
+        for key in SubService.KEYS:
+            if self._commands.get(key):
+                raise RuntimeError(f"Register a registered service: {key}!")
+            self._commands[key] = s
+
+    def get_service(self, SubService):
+        key = SubService.KEYS[0]
+        if svc := self._commands.get(key):
+            return svc
+        else:
+            raise RuntimeError(f"No such service: {key}!")
+
+    def run(self):
+        argcomplete.autocomplete(parser)
+        cmds = self.parse_args()(**self._args)
+        if isinstance(cmds, list):
+            for cmd in cmds:
+                run_sh(cmd, print_cmd=True)
+        else:
+            run_sh(cmds, print_cmd=True)
+
+    def parse_args(self):
+        self._args = vars(self._parser.parse_args())
+        sub_command = self._args.pop("sub_command")
+        if s := self._commands.get(sub_command):
+            if action := self._args.pop("action_command", None):
+                remotes = self.parse_remotes(self._args.pop("remote", None))
+                self._args["remotes"] = remotes
+                return getattr(s, f"{action.replace('-', '_')}_cmd")
+            logerr(f"No such command({sub_command}) action: {action}")
+            s.print_help()
+        else:
+            logerr(f"No such command: {sub_command}!")
+            self._parser.print_help()
+
+        return None
+
+    @staticmethod
+    def parse_remotes(remote: str) -> List[Tuple[str, str]]:
+        if remote:
+            remotes = remote.split(",")
+
+            def gen(remote):
+                xs = remote.split(":")
+                host = xs[0]
+                if len(xs) >= 2:
+                    addr = xs[1]
+                else:
+                    result = run_sh(
+                        f"ssh -G {host} | " + "awk '/^hostname / { print $2 }'",
+                        stdout=subprocess.PIPE,
+                    )
+                    if result and result.stdout:
+                        addr = result.stdout.decode().strip()
+                    else:
+                        raise ValueError(f"Unknown host: {remote}")
+                return (host, addr)
+
+            return [gen(r) for r in remotes]
+
+    @staticmethod
+    def stop_cmd(
+        container_bin,
+        container_name,
+        force=False,
+        remotes=None,
+        **kargs,
+    ):
+        if remotes:
+            return [
+                f"ssh {host} '{container_bin} rm -f {container_name}'"
+                if force
+                else f"ssh {host} '{container_bin} kill {container_name}'"
+                for (host, _) in remotes
+            ]
+
+    def remove_cmd(
+        self,
+        remotes,
+        persistent_dir,
+        container_bin,
+        container_name,
+        remove_container=True,
+        **kwargs,
+    ):
+        cmd = (
+            f"{container_bin} rm -f {container_name} &&"
+            if remove_container
+            else ""
+        )
+        return [
+            f"ssh {host} '{cmd} rm -rf {persistent_dir}'"
+            for (host, _) in remotes
+        ]
+
+    @staticmethod
+    def post_start_cmd(
+        container_bin,
+        container_name,
+        port=None,
+        command="",
+        remotes=None,
+        **kargs,
+    ):
+        if remotes and command:
+            ports_ = port.split(",") if port else []
+            wait = "".join(f"{wait_tcp_sh(p)} && " for p in ports_ if p)
+            return [
+                f"ssh -t {host} '{wait} {container_bin} exec -it {container_name} {command}' "
+                for (host, _) in remotes
+            ]
+
+
+class ZookeeperService(Service):
+    KEYS = ["zookeeper", "zk"]
+    DEFAULT_CONTAINER_NAME = "deploy_zookeeper"
+    DEFAULT_PERSISTENT_DIR = "/data/zookeeper"
+    DEFAULT_IMAGE_TAG = "docker.io/zookeeper:3.6"
+    DEFAULT_METRICS_PORT = 7070
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0], aliases=self.KEYS[1:], help="Manage zookeeper service"
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+
+        # ------------------------------
+        # zookeeper start
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=ZookeeperService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        start_parser.add_argument("--container-cmd", default="")
+        start_parser.add_argument(
+            "--persistent-dir",
+            default=self.DEFAULT_PERSISTENT_DIR,
+            help="where to store datas",
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        # ------------------------------
+        # zookeeper stop
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+        # ------------------------------
+        # zookeeper remove
+        remove_parser = argparse.ArgumentParser(add_help=False)
+        remove_parser.add_argument(
+            "--persistent-dir",
+            default=self.DEFAULT_PERSISTENT_DIR,
+            help="where to remove datas",
+        )
+        action_subparser.add_parser(
+            "remove", help="remove sevices", parents=[remove_parser]
+        )
+        # ------------------------------
+        # zookeeper post-start
+        post_start_parser = argparse.ArgumentParser(add_help=False)
+        post_start_parser.add_argument("--command", required=True, type=str)
+        post_start_parser.add_argument(
+            "--port",
+            required=False,
+            type=str,
+            default=None,
+            help="comma separated ports",
+        )
+        action_subparser.add_parser(
+            "post-start",
+            help="run command inside the container",
+            parents=[post_start_parser],
+        )
+        # ------------------------------
+        # zookeeper store
+        store_parser = argparse.ArgumentParser(add_help=False)
+        store_parser.add_argument(
+            "--key",
+            "-k",
+            required=True,
+            type=str,
+            help="node name need to create",
+        )
+        store_values_group = store_parser.add_mutually_exclusive_group(
+            required=True
+        )
+        store_values_group.add_argument(
+            "--file", type=str, help="the path of file need to store"
+        )
+        store_values_group.add_argument(
+            "--value", help="the value need to store"
+        )
+        action_subparser.add_parser(
+            "store",
+            help="create a zk node with specific name and value. ignore the operation if node exist.",
+            parents=[store_parser],
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        remotes,
+        container_name,
+        image,
+        memory_cpus,
+        persistent_dir=None,
+        extra_container_options="",
+        container_cmd="",
+        rm=False,
+        metrics_provider=False,
+        restart=True,
+        **kargs,
+    ):
+
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+
+        zoo_servers = " ".join(
+            f"server.{i + 1}={hostname}:2888:3888;2181"
+            for (i, (_, hostname)) in enumerate(remotes)
+        )
+        pre_cmd = ""
+        if persistent_dir:
+            persistent_dir = persistent_dir.rstrip("/")
+            pre_cmd = f"mkdir -p {persistent_dir}" + "/{data,datalog} && "
+            docker_opts += set_config_path(f"{persistent_dir}/data", "/data")
+            docker_opts += set_config_path(
+                f"{persistent_dir}/datalog", "/datalog"
+            )
+
+        cmds = []
+        for (i, (host, _)) in enumerate(remotes):
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                enable_metrics_provider = (
+                    f'-e ZOO_CFG_EXTRA="metricsProvider.className='
+                    f"org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider "
+                    f'metricsProvider.httpPort={self.DEFAULT_METRICS_PORT}"'
+                    if metrics_provider
+                    else ""
+                )
+
+                cmds.append(
+                    f"ssh {host} '{pre_cmd} "
+                    f"{container_bin} run -td "
+                    f"{docker_opts} --name {container_name} "
+                    # according to https://hub.docker.com/_/zookeeper, ZOO_MY_ID must between 1 and 255
+                    f'-e ZOO_MY_ID={i + 1} -e ZOO_SERVERS="{zoo_servers}" '
+                    f"{enable_metrics_provider} "
+                    f"--network host {extra_container_options} "
+                    f"{image} {container_cmd}' "
+                )
+
+        return cmds
+
+    @staticmethod
+    def store_cmd(
+        container_bin: str,
+        container_name: str,
+        key: str,
+        value: Optional[str],
+        file: Optional[str],
+        remotes: List[Tuple[str, str]] = None,
+        **kargs,
+    ) -> List[str]:
+        if not key.startswith("/"):
+            key = "/" + key
+
+        if remotes:
+            node_value = value if value else f'"$(cat {file})"'
+
+            waiting = "".join(
+                f"{wait_tcp_sh(2181, h)} && sleep 2" for (_, h) in remotes
+            )
+            store_command = lambda host: (
+                f"printf -v __ %q "
+                f"{node_value} "
+                f'&& ssh {host} "'
+                f"{waiting} && "
+                f"{container_bin} exec -t {container_name} zkCli.sh create {key} $__ || "
+                f"{container_bin} exec -t {container_name} zkCli.sh set {key} $__"
+                f'"'
+            )
+            return [store_command(host) for (host, _) in remotes]
+
+
+class HStoreAdminService(Service):
+    KEYS = ["hstore-admin"]
+    DEFAULT_CONTAINER_NAME = "deploy_hstore_admin"
+    DEFAULT_IMAGE_TAG = "docker.io/hstreamdb/hstream"
+    BOOTSTRAP_CMD = (
+        "hadmin store nodes-config bootstrap --metadata-replicate-across "
+    )
+    # TCP port on which the server listens to for admin commands, supports commands over SSL
+    DEFAULT_ADMIN_API_PORT = 6440
+    # TCP port on which the server listens for non-SSL clients
+    DEFAULT_SERVER_LISTEN_PORT = 16111
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage logdevice admin service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+
+        # ------------------------------
+        # hstore-admin start
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=HStoreAdminService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        start_parser.add_argument(
+            "--config-path",
+            required=True,
+            help="Zookeeper key to the config file",
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        # ------------------------------
+        # hstore-admin post-start
+        post_start_parser = argparse.ArgumentParser(add_help=False)
+        post_start_parser.add_argument(
+            "--command",
+            "-c",
+            help="command to run inside the container",
+        )
+        post_start_parser.add_argument(
+            "--port",
+            required=False,
+            type=str,
+            default=None,
+            help="comma separated ports",
+        )
+        action_subparser.add_parser(
+            "post-start",
+            help="run command inside the container",
+            parents=[post_start_parser],
+        )
+        # ------------------------------
+        # hstore-admin stop
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+        # ------------------------------
+        # hstore-admin bootstrap
+        bootstrap_parser = argparse.ArgumentParser(add_help=False)
+        bootstrap_parser.add_argument(
+            "--replicates",
+            "-r",
+            required=True,
+            help="number of replications of metadata logs",
+        )
+        bootstrap_parser.add_argument(
+            "--server-list",
+            "-s",
+            required=True,
+            type=str,
+            help="comma separated hstore server (host,local_address) pairs, e.g. server1:10.100.0.1,server2:10.100.0.2",
+        )
+        bootstrap_parser.add_argument(
+            "--wait",
+            type=int,
+            default=4,
+            help="wait time in seconds for internal information synchronization before bootstrap.",
+        )
+        action_subparser.add_parser(
+            "bootstrap",
+            help="bootstrap hstore cluster",
+            parents=[bootstrap_parser],
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    # start hstore-admin
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        remotes,
+        image,
+        memory_cpus,
+        config_path,
+        extra_container_options="",
+        rm=False,
+        restart=True,
+        **kargs,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+
+        cmds = []
+        for (host, _) in remotes:
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    f"--network host {image} /usr/local/bin/ld-admin-server "
+                    f"--config-path {config_path} "
+                    "--enable-maintenance-manager "
+                    "--maintenance-log-snapshotting "
+                    "--enable-safety-check-periodic-metadata-update "
+                    f"'"
+                )
+
+        return cmds
+
+    def bootstrap_cmd(
+        self,
+        container_bin: str,
+        container_name: str,
+        remotes: List[Tuple[str, str]],
+        server_list: str,
+        replicates: int,
+        wait: int,
+        **kargs,
+    ) -> List[str]:
+        servers = self.parse_remotes(server_list)
+        if servers and remotes:
+            wait_port = "".join(
+                f"{wait_tcp_sh(self.DEFAULT_ADMIN_API_PORT, store_host)} && "
+                f"{wait_tcp_sh(self.DEFAULT_SERVER_LISTEN_PORT, store_host)} && "
+                for (_, store_host) in servers
+            )
+
+            return [
+                f"ssh -t {host} "
+                f"'{wait_port} sleep {wait} && "
+                f"{container_bin} exec -it {container_name} {self.BOOTSTRAP_CMD} node:{replicates}'"
+                for (host, _) in remotes
+            ]
+
+
+class HStoreService(Service):
+    KEYS = ["hstore"]
+    DEFAULT_CONTAINER_NAME = "deploy_hstore"
+    DEFAULT_PERSISTENT_DIR = "/data/store"
+    DEFAULT_IMAGE_TAG = "docker.io/hstreamdb/hstream"
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage logdevice service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+
+        # ------------------------------
+        # hstore start
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=HStoreService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        start_parser.add_argument(
+            "--data-dir", default=self.DEFAULT_PERSISTENT_DIR
+        )
+        start_parser.add_argument("--shards", default=1, type=int)
+        start_parser.add_argument(
+            "--config-path",
+            required=True,
+            help="Zookeeper key to the config file",
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        # ------------------------------
+        # hstore stop
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+        # ------------------------------
+        # hstore remove
+        remove_parser = argparse.ArgumentParser(add_help=False)
+        remove_parser.add_argument(
+            "--persistent-dir",
+            default=self.DEFAULT_PERSISTENT_DIR,
+            help="where to remove datas",
+        )
+        action_subparser.add_parser(
+            "remove",
+            help="remove store service",
+            parents=[remove_parser],
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin: str,
+        container_name: str,
+        image: str,
+        memory_cpus: Tuple[str, str],
+        data_dir: str,
+        shards: int,
+        config_path: str,
+        remotes: List[Tuple[str, str]],
+        rm: bool = False,
+        restart: bool = True,
+        **kargs,
+    ) -> List[str]:
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+
+        cmds = []
+        shards_path = Path(data_dir).joinpath("NSHARDS")
+        for (i, (host, addr)) in enumerate(remotes):
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"mkdir -p {data_dir} && echo {shards} | tee {shards_path} && "
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    "--network host "
+                    f"-v {data_dir}:{data_dir} "
+                    f"{image} /usr/local/bin/logdeviced "
+                    f"--config-path {config_path} "
+                    f"--name ld_{i} --address {addr} "
+                    f"--local-log-store-path {data_dir} "
+                    f"--num-shards {shards} "
+                    f"'"
+                )
+        return cmds
+
+
+class HServerService(Service):
+    KEYS = ["hserver"]
+    DEFAULT_CONTAINER_NAME = "deploy_hserver"
+    DEFAULT_IMAGE_TAG = "docker.io/hstreamdb/hstream"
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage hserver service",
+        )
+        self._server_id = 1
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=HServerService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        start_parser.add_argument(
+            "--store-config",
+            required=True,
+            help="Zookeeper key to the store config file",
+        )
+        start_parser.add_argument(
+            "--config-path",
+            help="HStreamDB configuration file path",
+        )
+        start_parser.add_argument(
+            "--store-admin-host",
+            required=True,
+        )
+        start_parser.add_argument("--zkuri", required=True)
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        image,
+        memory_cpus,
+        zkuri,
+        store_config,
+        remotes,
+        extra_container_options="",
+        rm=False,
+        config_path=None,
+        restart=True,
+        **kargs,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+
+        if config_path is not None:
+            docker_opts += set_config_path(
+                config_path, DEFAULT_CONTAINER_CONFIG_PATH
+            )
+        cmds = []
+        seed_address = remotes[0][1]
+        for (i, (host, addr)) in enumerate(remotes):
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    "--network host "
+                    f"{image} /usr/local/bin/hstream-server "
+                    f"--bind-address {addr} "
+                    f"--advertised-address {addr} "
+                    f"--config-path {DEFAULT_CONTAINER_CONFIG_PATH} "
+                    f"--zkuri {zkuri} "
+                    f"--store-config {store_config} "
+                    f"--server-id {i} "
+                    f"--store-log-level error "
+                    f"--seed-nodes {seed_address} "
+                    f"'"
+                )
+        return cmds
+
+
+class PrometheusService(Service):
+    KEYS = ["prometheus"]
+    DEFAULT_CONTAINER_NAME = "deploy_prometheus"
+    DEFAULT_PERSISTENT_DIR = "/data/prometheus"
+    DEFAULT_IMAGE_TAG = "docker.io/prom/prometheus"
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage prometheus service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=PrometheusService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        start_parser.add_argument(
+            "--prometheus-config",
+            help="Prometheus configuration file path",
+        )
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        remotes,
+        image,
+        memory_cpus,
+        rm=False,
+        config_path=None,
+        restart=True,
+        **args,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+        if config_path is not None:
+            docker_opts += set_config_path(config_path, "/etc/prometheus")
+
+        cmds = []
+        for (host, _) in remotes:
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    f"--network host "
+                    f"{image}"
+                    f"'"
+                )
+        return cmds
+
+
+class NodeExporterService(Service):
+    KEYS = ["node-exporter"]
+    DEFAULT_CONTAINER_NAME = "deploy_node_exporter"
+    DEFAULT_IMAGE_TAG = "docker.io/prom/node-exporter"
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage node-exporter service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=NodeExporterService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        remotes,
+        image,
+        memory_cpus,
+        rm=False,
+        restart=True,
+        **args,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+        cmds = []
+
+        for (host, _) in remotes:
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    f"--network host "
+                    f"--pid=host "
+                    f'-v "/:/host:ro,rslave" '
+                    f"{image} "
+                    f"--path.rootfs=/host"
+                    f"'"
+                )
+        return cmds
+
+
+class CadvisorService(Service):
+    KEYS = ["cadvisor"]
+    DEFAULT_CONTAINER_NAME = "deploy_cadvisor"
+    DEFAULT_IMAGE_TAG = "gcr.io/cadvisor/cadvisor:v0.39.3"
+    DEFAULT_METRICS_PORT = 7000
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage cadvisor service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=CadvisorService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+        action_subparser.add_parser(
+            "start", help="start sevices", parents=[start_parser]
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        remotes,
+        image,
+        memory_cpus,
+        rm=False,
+        restart=True,
+        port=DEFAULT_METRICS_PORT,
+        **args,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+        cmds = []
+
+        for (host, _) in remotes:
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    f"-v /:/rootfs:ro "
+                    f"-v /var/run:/var/run:ro "
+                    f"-v /sys:/sys:ro "
+                    f"-v /var/lib/docker/:/var/lib/docker:ro "
+                    f"-v /dev/disk/:/dev/disk:ro "
+                    f"-p {port}:8080 "
+                    f"--detach=true "
+                    f"--privileged=true "
+                    f"--device /dev/kmsg "
+                    f"{image}"
+                    f"'"
+                )
+        return cmds
+
+
+class GrafanaService(Service):
+    KEYS = ["grafana"]
+    DEFAULT_CONTAINER_NAME = "deploy_grafana"
+    DEFAULT_IMAGE_TAG = "docker.io/grafana/grafana-oss:main"
+
+    NO_LOGIN_ENV_OPTS = "".join(
+        [
+            " -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin ",
+            " -e GF_AUTH_ANONYMOUS_ENABLED=true ",
+            " -e GF_AUTH_DISABLE_LOGIN_FORM=true ",
+        ]
+    )
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Manage grafana service",
+        )
+
+    def init_parser(self):
+        self.cmd.add_argument(
+            "--container-name", default=self.DEFAULT_CONTAINER_NAME
+        )
+        self.cmd.add_argument(
+            "--extra-container-options",
+            required=False,
+            default="",
+            type=str,
+        )
+        start_parser = argparse.ArgumentParser(add_help=False)
+        start_parser.add_argument(
+            "--image", default=GrafanaService.DEFAULT_IMAGE_TAG
+        )
+        start_parser.add_argument("--rm", action="store_true")
+        stop_parser = argparse.ArgumentParser(add_help=False)
+        stop_parser.add_argument(
+            "--force", "-f", default=False, action="store_true"
+        )
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+        action_subparser.add_parser(
+            "start", help="start services", parents=[start_parser]
+        )
+        action_subparser.add_parser(
+            "stop", help="stop services", parents=[stop_parser]
+        )
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    def start_cmd(
+        self,
+        container_bin,
+        container_name,
+        remotes,
+        image,
+        memory_cpus,
+        rm=False,
+        restart=True,
+        disable_login=True,
+        config_path=None,
+        provisioning_path=None,
+        **args,
+    ):
+        docker_opts = ""
+        docker_opts += set_rm_intermediate(rm)
+        docker_opts += set_resource_constraints(memory_cpus)
+        docker_opts += set_restart(restart)
+
+        docker_opts += self.NO_LOGIN_ENV_OPTS if disable_login else ""
+        docker_opts += (
+            set_config_path(config_path, "/etc/grafana/grafana.ini")
+            if config_path is not None
+            else ""
+        )
+        docker_opts += (
+            set_config_path(provisioning_path, "/etc/grafana/provisioning")
+            if provisioning_path is not None
+            else ""
+        )
+
+        cmds = []
+
+        for (host, _) in remotes:
+            if is_container_running(host, container_name, container_bin):
+                logwarn(f"Service {self.KEYS[0]} already running.")
+            else:
+                cmds.append(
+                    f"ssh {host} '"
+                    f"{container_bin} run -d "
+                    f"--network host "
+                    f"{docker_opts} "
+                    f"--name {container_name} "
+                    f"{image}'"
+                )
+
+        return cmds
+
+
+class BasicConf:
+    hosts: Union[List[Tuple[str, str]], None] = None
+    image: Union[str, None] = None
+    cpu: Union[str, None] = None
+    memory: Union[str, None] = None
+    local_conf_path: Union[str, Path, None] = None
+    remote_conf_path: Union[str, Path, None] = None
+    persistent_dir: Union[str, Path, None] = None
+
+    def __init__(self, config: Dict[str, str], hosts: Dict[str, str]):
+        self.hosts = [(host, hosts[host]) for host in config.get("hosts", [])]
+        self.image = config.get("image")
+        self.cpu = config.get("cpu")
+        self.memory = config.get("memory")
+        self.local_conf_path = config.get("local_config_path")
+        self.remote_conf_path = config.get("remote_config_path")
+        self.persistent_dir = config.get(
+            "persistent-dir", HStoreService.DEFAULT_PERSISTENT_DIR
+        )
+
+    def get_memory_cpu(self) -> Tuple[str, str]:
+        return (self.memory, self.cpu)
+
+
+class ZkConf(BasicConf):
+    DEFAULT_STORE_CONFIG_NODE_IN_ZK = "/logdevice.conf"
+
+    zk_ip: Union[str, None] = None
+    config_path_in_zk: Union[str, Path, None] = None
+    enable_metrics: bool = True
+
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.zk_ip = ",".join(map(lambda x: x[1] + ":2181", self.hosts))
+        # config_path_in_zk: zk:host1:2181,host2:2181/logdevice.conf
+        self.config_path_in_zk = (
+            "zk:" + self.zk_ip + self.DEFAULT_STORE_CONFIG_NODE_IN_ZK
+        )
+        self.enable_metrics = config.get("enable-metrics-provider")
+        self.image = config.get("image", ZookeeperService.DEFAULT_IMAGE_TAG)
+
+
+class HStoreConf(BasicConf):
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", HStoreService.DEFAULT_IMAGE_TAG)
+
+
+class HAdminConf(BasicConf):
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", HStoreAdminService.DEFAULT_IMAGE_TAG)
+
+
+class HServerConf(BasicConf):
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", HServerService.DEFAULT_IMAGE_TAG)
+
+
+class PrometheusConf(BasicConf):
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", PrometheusService.DEFAULT_IMAGE_TAG)
+
+
+class NodeExporterConf(BasicConf):
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", NodeExporterService.DEFAULT_IMAGE_TAG)
+
+
+class CadVisorConf(BasicConf):
+    cadvisor_port: Union[str, None] = None
+
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", CadvisorService.DEFAULT_IMAGE_TAG)
+        self.cadvisor_port = config.get(
+            "port", CadvisorService.DEFAULT_METRICS_PORT
+        )
+
+
+class GrafanaConf(BasicConf):
+    disable_login: bool = False
+    local_provisioning_path: Union[str, Path, None] = None
+    remote_provisioning_path: Union[str, Path, None] = None
+
+    def __init__(self, config: Dict[str, Any], hosts: Dict[str, str]):
+        super().__init__(config, hosts)
+        self.image = config.get("image", GrafanaService.DEFAULT_IMAGE_TAG)
+        self.disable_login = config.get("disable-login")
+        self.local_provisioning_path = config.get("local-provisioning-path")
+        self.remote_provisioning_path = config.get("remote-provisioning-path")
+
+
+class SimpleService(Service):
+    KEYS = ["simple"]
+    DEFAULT_CONTAINER_BIN = "docker"
+    ALL_SERVICES = [
+        "zk",
+        "hstore",
+        "hadmin",
+        "hserver",
+        "prometheus",
+        "node-exporter",
+    ]
+
+    def __init__(self, cmdparsers):
+        self._cmdparsers = cmdparsers
+        self.cmd = self._cmdparsers.add_parser(
+            self.KEYS[0],
+            aliases=self.KEYS[1:],
+            help="Cluster deploy service",
+        )
+        self.ZK_SVC = super().get_service(ZookeeperService)
+        self.HSTORE_ADMIN_SVC = super().get_service(HStoreAdminService)
+        self.HSTORE_SVC = super().get_service(HStoreService)
+        self.HSERVER_SVC = super().get_service(HServerService)
+        self.PROMETHEUS_SVC = super().get_service(PrometheusService)
+        self.NODE_EXPORTER_SVC = super().get_service(NodeExporterService)
+        self.CADVISOR_SVC = super().get_service(CadvisorService)
+        self.GRAFANA_SVC = super().get_service(GrafanaService)
+
+    def init_parser(self):
+        self.cmd.add_argument("--config", default=DEFAULT_DEPLOY_CONF)
+
+        action_subparser = self.cmd.add_subparsers(
+            title="action", dest="action_command"
+        )
+
+        start_parser = argparse.ArgumentParser(add_help=False)
+        total_choices = SimpleService.ALL_SERVICES[:]
+        total_choices.append("all")
+        start_parser.add_argument(
+            "--disable-restart",
+            choices=total_choices,
+            nargs="+",
+            default=[],
+            help="disable container restart strategy.",
+        )
+        action_subparser.add_parser(
+            "start", help="start services", parents=[start_parser]
+        )
+
+        action_subparser.add_parser("stop", help="stop services")
+        action_subparser.add_parser("remove", help="remove persistent data")
+
+    def parse_config(self, config):
+        with open(config, "r") as f:
+            deploy_cfg = json.load(f)
+            hosts = deploy_cfg.get("hosts")
+
+            print("zookeeper" in deploy_cfg)
+            self.zk_conf = (
+                ZkConf(deploy_cfg.get("zookeeper"), hosts)
+                if "zookeeper" in deploy_cfg
+                else None
+            )
+            self.hstore_conf = (
+                HStoreConf(deploy_cfg.get("hstore"), hosts)
+                if "hstore" in deploy_cfg
+                else None
+            )
+            self.hadmin_conf = (
+                HAdminConf(deploy_cfg.get("hstore-admin"), hosts)
+                if "hstore-admin" in deploy_cfg
+                else None
+            )
+            self.hserver_conf = (
+                HServerConf(deploy_cfg.get("hserver"), hosts)
+                if "hserver" in deploy_cfg
+                else None
+            )
+            self.prometheus_conf = (
+                PrometheusConf(deploy_cfg.get("prometheus", None), hosts)
+                if "prometheus" in deploy_cfg
+                else None
+            )
+            self.node_exporter_conf = (
+                NodeExporterConf(deploy_cfg.get("node-exporter"), hosts)
+                if "node-exporter" in deploy_cfg
+                else None
+            )
+            self.cadvisor_conf = (
+                CadVisorConf(deploy_cfg.get("cadvisor"), hosts)
+                if "cadvisor" in deploy_cfg
+                else None
+            )
+            self.grafana_conf = (
+                GrafanaConf(deploy_cfg.get("grafana"), hosts)
+                if "grafana" in deploy_cfg
+                else None
+            )
+
+    def start_cmd(self, config: str, disable_restart, **kargs) -> List[str]:
+        self.parse_config(config)
+        cmds = self.pre_start()
+
+        disable_restarted = set()
+        for choice in disable_restart:
+            if choice == "all":
+                disable_restarted.update(SimpleService.ALL_SERVICES)
+            else:
+                disable_restarted.add(choice)
+        loginfo(f"{disable_restarted=}")
+
+        # start zookeeper
+        if self.zk_conf:
+            zk_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": ZookeeperService.DEFAULT_CONTAINER_NAME,
+                "image": self.zk_conf.image,
+            }
+            zk_start_args = {
+                "remotes": self.zk_conf.hosts,
+                "persistent_dir": self.zk_conf.persistent_dir,
+                "metrics_provider": self.zk_conf.enable_metrics,
+                "memory_cpus": self.zk_conf.get_memory_cpu(),
+                "restart": False if "zk" in disable_restarted else True,
+                **zk_args,
+            }
+            cmds.extend(self.ZK_SVC.start_cmd(**zk_start_args))
+
+            zk_store_args = {
+                "remotes": [self.zk_conf.hosts[0]],
+                "key": ZkConf.DEFAULT_STORE_CONFIG_NODE_IN_ZK,
+                "file": self.hstore_conf.local_conf_path,
+                "value": None,
+                **zk_args,
+            }
+            cmds.extend(self.ZK_SVC.store_cmd(**zk_store_args))
+
+            zk_cmd_args = {
+                "remotes": [self.zk_conf.hosts[0]],
+                "command": "zkCli.sh get " + zk_store_args["key"],
+                **zk_args,
+            }
+            cmds.extend(self.ZK_SVC.post_start_cmd(**zk_cmd_args))
+
+        # start hstore_admin
+        if self.hadmin_conf:
+            admin_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HStoreAdminService.DEFAULT_CONTAINER_NAME,
+                "image": self.hadmin_conf.image,
+                "memory_cpus": self.hadmin_conf.get_memory_cpu(),
+                "config_path": self.zk_conf.config_path_in_zk,
+                "remotes": self.hadmin_conf.hosts,
+                "restart": False if "hadmin" in disable_restarted else True,
+            }
+            cmds.extend(self.HSTORE_ADMIN_SVC.start_cmd(**admin_args))
+
+        # start hstore
+        if self.hstore_conf:
+            store_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HStoreService.DEFAULT_CONTAINER_NAME,
+                "image": self.hstore_conf.image,
+                "memory_cpus": self.hstore_conf.get_memory_cpu(),
+                "config_path": self.zk_conf.config_path_in_zk,
+                "data_dir": self.hstore_conf.persistent_dir,
+                # FIXME: make shards configurable
+                "shards": 1,
+                "remotes": self.hstore_conf.hosts,
+                "restart": False if "hstore" in disable_restarted else True,
+            }
+            cmds.extend(self.HSTORE_SVC.start_cmd(**store_args))
+
+        # bootstrap
+        bootstrap_args = {
+            "container_bin": self.DEFAULT_CONTAINER_BIN,
+            "container_name": HStoreAdminService.DEFAULT_CONTAINER_NAME,
+            "remotes": self.hadmin_conf.hosts,
+            "replicates": 3,
+            "server_list": ",".join(
+                map(lambda pair: f"{pair[0]}:{pair[1]}", self.hstore_conf.hosts)
+            ),
+            "wait": 4,
+        }
+        cmds.extend(self.HSTORE_ADMIN_SVC.bootstrap_cmd(**bootstrap_args))
+
+        # start hserver
+        if self.hserver_conf:
+            server_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HServerService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.hserver_conf.hosts,
+                "image": self.hserver_conf.image,
+                "memory_cpus": self.hserver_conf.get_memory_cpu(),
+                "zkuri": self.zk_conf.zk_ip,
+                "store_config": self.zk_conf.config_path_in_zk,
+                "config_path": self.hserver_conf.remote_conf_path,
+                "restart": False if "hserver" in disable_restarted else True,
+            }
+            cmds.extend(self.HSERVER_SVC.start_cmd(**server_args))
+
+        # start prometheus
+        if self.prometheus_conf:
+            prometheus_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": PrometheusService.DEFAULT_CONTAINER_NAME,
+                "config_path": self.prometheus_conf.remote_conf_path,
+                "image": self.prometheus_conf.image,
+                "memory_cpus": self.prometheus_conf.get_memory_cpu(),
+                "remotes": self.prometheus_conf.hosts,
+                "restart": False if "prometheus" in disable_restarted else True,
+            }
+            cmds.extend(self.PROMETHEUS_SVC.start_cmd(**prometheus_args))
+
+        # start node-exporter
+        if self.node_exporter_conf:
+            node_exporter_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": NodeExporterService.DEFAULT_CONTAINER_NAME,
+                "image": self.node_exporter_conf.image,
+                "memory_cpus": self.node_exporter_conf.get_memory_cpu(),
+                "remotes": self.node_exporter_conf.hosts,
+                "restart": False
+                if "node-exporter" in disable_restarted
+                else True,
+            }
+            cmds.extend(self.NODE_EXPORTER_SVC.start_cmd(**node_exporter_args))
+
+        # start cadvisor
+        if self.cadvisor_conf:
+            cadvisor_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": CadvisorService.DEFAULT_CONTAINER_NAME,
+                "image": self.cadvisor_conf.image,
+                "memory_cpus": self.cadvisor_conf.get_memory_cpu(),
+                "remotes": self.cadvisor_conf.hosts,
+                "restart": False if "cadvisor" in disable_restarted else True,
+                "port": self.cadvisor_conf.cadvisor_port,
+            }
+            cmds.extend(self.CADVISOR_SVC.start_cmd(**cadvisor_args))
+
+        # start grafana
+        if self.grafana_conf:
+            grafana_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": GrafanaService.DEFAULT_CONTAINER_NAME,
+                "image": self.grafana_conf.image,
+                "memory_cpus": self.grafana_conf.get_memory_cpu(),
+                "remotes": self.grafana_conf.hosts,
+                "restart": False if "grafana" in disable_restarted else True,
+                "disable_login": self.grafana_conf.disable_login,
+                "config_path": self.grafana_conf.remote_conf_path,
+                "provisioning_path": self.grafana_conf.remote_provisioning_path,
+            }
+            cmds.extend(self.GRAFANA_SVC.start_cmd(**grafana_args))
+
+        return cmds
+
+    def stop_cmd(self, config: str, **kargs) -> List[str]:
+        self.parse_config(config)
+        cmds = []
+
+        # stop hserver
+        if self.hserver_conf:
+            server_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HServerService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.hserver_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.HSERVER_SVC.stop_cmd(**server_args))
+
+        # stop hstore
+        if self.hstore_conf:
+            store_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HStoreService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.hserver_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.HSTORE_SVC.stop_cmd(**store_args))
+
+        # stop hstore-admin
+        if self.hadmin_conf:
+            admin_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HStoreAdminService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.hadmin_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.HSTORE_ADMIN_SVC.stop_cmd(**admin_args))
+
+        # stop zk
+        if self.zk_conf:
+            zk_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": ZookeeperService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.zk_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.ZK_SVC.stop_cmd(**zk_args))
+
+        # stop prometheus
+        if self.prometheus_conf:
+            prometheus_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": PrometheusService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.prometheus_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.PROMETHEUS_SVC.stop_cmd(**prometheus_args))
+
+        # stop node-exporter
+        if self.node_exporter_conf:
+            node_exporter_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": NodeExporterService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.node_exporter_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.NODE_EXPORTER_SVC.stop_cmd(**node_exporter_args))
+
+        # stop cadvisor
+        if self.cadvisor_conf:
+            cadvisor_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": CadvisorService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.cadvisor_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.CADVISOR_SVC.stop_cmd(**cadvisor_args))
+
+        # stop grafana
+        if self.grafana_conf:
+            grafana_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": GrafanaService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.grafana_conf.hosts,
+                "force": True,
+            }
+            cmds.extend(self.GRAFANA_SVC.stop_cmd(**grafana_args))
+
+        return cmds
+
+    def remove_cmd(self, config: str, **kargs) -> List[str]:
+        self.parse_config(config)
+
+        # stop all containers
+        stop_cmds = self.stop_cmd(config, **kargs)
+        # remove store persistent data
+        if self.hstore_conf:
+            store_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": HStoreService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.hstore_conf.hosts,
+                "persistent_dir": self.hstore_conf.persistent_dir,
+            }
+            stop_cmds.extend(
+                self.HSTORE_SVC.remove_cmd(
+                    # since we already removed the container
+                    **store_args,
+                    remove_container=False,
+                )
+            )
+        # remove zk persistent data
+        if self.zk_conf:
+            zk_args = {
+                "container_bin": self.DEFAULT_CONTAINER_BIN,
+                "container_name": ZookeeperService.DEFAULT_CONTAINER_NAME,
+                "remotes": self.zk_conf.hosts,
+                "persistent_dir": self.zk_conf.persistent_dir,
+            }
+            stop_cmds.extend(
+                self.ZK_SVC.remove_cmd(**zk_args, remove_container=False)
+            )
+
+        return stop_cmds
+
+    def print_help(self):
+        return self.cmd.print_help()
+
+    @staticmethod
+    def synchronize_config(config):
+        return synchronize_configs(
+            config.local_conf_path,
+            config.remote_conf_path,
+            config.hosts,
+        )
+
+    def pre_start(self):
+        """
+        pre-start will synchronize config files to all hosts
+        """
+        cmds = []
+        # FIXME: store local config is always required because user should set zookeeper related field, which cannot
+        #  be default
+        if self.hstore_conf:
+            cmds.extend(self.synchronize_config(self.hstore_conf))
+        if self.hserver_conf:
+            cmds.extend(self.synchronize_config(self.hserver_conf))
+        if self.prometheus_conf:
+            cmds.extend(self.synchronize_config(self.prometheus_conf))
+        if self.grafana_conf:
+            cmds.extend(self.synchronize_config(self.grafana_conf))
+            cmds.extend(
+                synchronize_configs(
+                    self.grafana_conf.local_provisioning_path,
+                    self.grafana_conf.remote_provisioning_path,
+                    self.grafana_conf.hosts,
+                )
+            )
+        return cmds
+
+
+# -----------------------------------------------------------------------------
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="HStream dev tools.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    s = Service(parser)
+    s.register(ZookeeperService)
+    s.register(HStoreAdminService)
+    s.register(HStoreService)
+    s.register(HServerService)
+    s.register(PrometheusService)
+    s.register(NodeExporterService)
+    s.register(CadvisorService)
+    s.register(GrafanaService)
+    s.register(SimpleService)
+    s.run()

@@ -1,87 +1,457 @@
-cabal-version:      2.2
-name:               hstream
-version:            0.1.0.0
+cabal-version: 3.6
+name:          hstream
+version:       0.1.0.0
 synopsis:
   High performance stream processing platform for IoT data written in Haskell.
 
 description:
-  Please see the README on Github at
-  <https://github.com/hstream-io/hstream#readme>
+  Please see the README on GitHub at
+  <https://github.com/hstreamdb/hstream#readme>
 
-license:            BSD-3-Clause
-license-file:       LICENSE
-copyright:          Copyright (c) 2020 EMQ Technologies Co., Ltd.
-author:             Feng Lee <feng@emqx.io>
-maintainer:         lambda@emqx.io
-tested-with:        GHC ==8.8.4 || ==8.10.4
-category:           Database
-homepage:           https://github.com/hstream-io/hstream
-bug-reports:        https://github.com/hstream-io/hstream/issues
-build-type:         Simple
-extra-source-files: ChangeLog.md
+license:       BSD-3-Clause
+license-file:  LICENSE
+copyright:     Copyright (c) 2020 EMQ Technologies Co., Ltd.
+author:        Feng Lee <feng@emqx.io>
+maintainer:    lambda@emqx.io, wangbin@emqx.io
+tested-with:   GHC ==9.4.8
+category:      Database
+homepage:      https://github.com/hstreamdb/hstream
+bug-reports:   https://github.com/hstreamdb/hstream/issues
+build-type:    Simple
 
 source-repository head
   type:     git
-  location: https://github.com/hstream-io/hstream
+  location: https://github.com/hstreamdb/hstream
 
-library
-  build-depends:
-    , base
-    , aeson
-    , text
-    , unordered-containers
-    , vector
-    , hstream-server
-    , hstream-sql
-    , containers
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
 
-  default-language: Haskell2010
-  exposed-modules:  HStream.Format
+flag hstream_use_grpc_haskell
+  default:     False
+  description: Use grpc_haskell instead
 
-executable hstream-client
-  main-is:          Main.hs
-  hs-source-dirs:   client
-  build-depends:
-    , base
-    , bytestring
-    , grpc-haskell
-    , haskeline
-    , hstream
-    , hstream-server
-    , hstream-sql
-    , optparse-applicative
-    , random
-    , raw-strings-qq
-    , text
-    , grpc-haskell-core
-    , unix
+flag hstream_use_v2_engine
+  default:     False
+  description: Use v2 processing engine
 
-  default-language: Haskell2010
-  ghc-options:
-    -Wall -Wcompat -Widentities -Wincomplete-record-updates -threaded
-    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+flag hstream_enable_schema
+  default:     False
+  description:
+    Save schema with streams and enable schema-related pipelines
 
-test-suite hstream-test
-  type:               exitcode-stdio-1.0
-  main-is:            Spec.hs
-  other-modules:      HStream.RunSQLSpec
-  hs-source-dirs:     test
-  build-depends:
-    , aeson
-    , base                >=4.11 && <5
-    , hspec
-    , hstream-processing
-    , hstream-sql
-    , hstream-store
-    , hstream-server
-    , random              ^>=1.2
-    , rio
-    , scientific
-    , Z-Data
+flag hstream_enable_asan
+  default:     False
+  description:
+    Enable AddressSanitizer. NOTE: This do not support build with template-haskell.
 
-  default-language:   Haskell2010
-  build-tool-depends: hspec-discover:hspec-discover ==2.*
+common shared-properties
   ghc-options:
     -Wall -Wcompat -Widentities -Wincomplete-record-updates
     -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
-    -threaded -rtsopts -with-rtsopts=-N
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
+
+  if flag(hstream_use_v2_engine)
+    cpp-options: -DHStreamUseV2Engine
+
+  if flag(hstream_enable_schema)
+    cpp-options: -DHStreamEnableSchema
+
+-- XXX: Tricky options to link static archive, see: https://github.com/haskell/cabal/issues/4677
+common link-asan
+  if os(osx)
+    ghc-options: "-optl-Wl,-lasan"
+
+  if !os(osx)
+    ghc-options:
+      -pgml g++ "-optl-Wl,--allow-multiple-definition"
+      "-optl-Wl,--whole-archive" "-optl-Wl,-Bstatic" "-optl-Wl,-lasan"
+      "-optl-Wl,-Bdynamic" "-optl-Wl,--no-whole-archive"
+
+-- Local library for HStream RawStrings, see module description for why we need this.
+library hstream-lib-rawstring
+  import:           shared-properties
+  hs-source-dirs:   src/lib
+  exposed-modules:  HStream.RawString
+  build-depends:
+    , base
+    , containers
+    , raw-strings-qq
+
+  if flag(hstream_enable_asan)
+    cpp-options: -DHSTREAM_ENABLE_ASAN
+
+  default-language: Haskell2010
+
+library
+  import:             shared-properties
+  exposed-modules:
+    HStream.Client.Action
+    HStream.Client.Execute
+    HStream.Client.Internal
+    HStream.Client.SQL
+    HStream.Client.SQLNew
+    HStream.Client.Types
+    HStream.Client.Utils
+    HStream.Server.Config
+    HStream.Server.Configuration.Cli
+    HStream.Server.ConnectorTypes
+    HStream.Server.Core.Cluster
+    HStream.Server.Core.Common
+    HStream.Server.Exception
+    HStream.Server.Experimental
+    HStream.Server.Handler
+    HStream.Server.Handler.Common
+    HStream.Server.HsGrpcHandler
+    HStream.Server.HStore
+    HStream.Server.Initialization
+    HStream.Server.MetaData
+    HStream.Server.QueryWorker
+    HStream.Server.Types
+    HStream.Server.Validation
+    HStream.Server.CacheStore
+    HStream.Server.HealthMonitor
+
+  other-modules:
+    HStream.Server.Core.Query
+    HStream.Server.Core.QueryNew
+    HStream.Server.Core.ShardReader
+    HStream.Server.Core.Stream
+    HStream.Server.Core.Subscription
+    HStream.Server.Core.View
+    HStream.Server.Core.ViewNew
+    HStream.Server.Experimental.StreamV2
+    HStream.Server.Handler.Admin
+    HStream.Server.Handler.Cluster
+    HStream.Server.Handler.Connector
+    HStream.Server.Handler.Extra
+    HStream.Server.Handler.Query
+    HStream.Server.Handler.Schema
+    HStream.Server.Handler.ShardReader
+    HStream.Server.Handler.Stats
+    HStream.Server.Handler.Stream
+    HStream.Server.Handler.Subscription
+    HStream.Server.Handler.View
+    HStream.Server.MetaData.Exception
+    HStream.Server.MetaData.Types
+    HStream.Server.MetaData.Utils
+    HStream.Server.MetaData.Value
+
+  hs-source-dirs:     src
+  build-depends:
+    , aeson
+    , aeson-pretty
+    , ansi-terminal
+    , async
+    , attoparsec
+    , base
+    , bytestring
+    , containers
+    , cryptohash-md5
+    , data-default
+    , deepseq
+    , diff-flow
+    , directory
+    , filelock
+    , grpc-haskell
+    , grpc-haskell-core
+    , hashable
+    , haskeline
+    , heaps
+    , hs-grpc-server
+    , hstream-admin-server
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-server
+    , hstream-common-stats
+    , hstream-gossip
+    , hstream-io
+    , hstream-kafka
+    , hstream-processing
+    , hstream-sql
+    , hstream-store
+    , hstream:hstream-lib-rawstring
+    , memory
+    , microlens
+    , microlens-aeson
+    , network
+    , network-uri
+    , optparse-applicative
+    , proto3-suite
+    , proto3-wire
+    , rocksdb-haskell-bindings
+    , scientific
+    , split
+    , statgrab
+    , stm
+    , string-random
+    , suspend
+    , table-layout
+    , text
+    , time
+    , timers
+    , unix
+    , unordered-containers
+    , uuid
+    , vector                         ^>=0.13
+    , vector-algorithms
+    , yaml
+    , Z-Data
+    , zoovisitor
+    , clock
+
+  if impl(ghc <9.2.0)
+    build-depends: hstream-admin-store
+
+  if flag(hstream_enable_asan)
+    cpp-options: -DHSTREAM_ENABLE_ASAN
+
+  build-tool-depends: hpp:hpp >=0.6 && <0.7
+  default-language:   Haskell2010
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+-- Local app library
+library hstream-app
+  import:           shared-properties
+  hs-source-dirs:   app/lib
+  exposed-modules:  KafkaServer
+  build-depends:
+    , async
+    , base
+    , bytestring
+    , containers
+    , cryptonite
+    , deepseq
+    , grpc-haskell
+    , grpc-haskell-core
+    , hs-grpc-server
+    , hstream-admin-server
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-server
+    , hstream-common-stats
+    , hstream-gossip
+    , hstream-kafka
+    , hstream-store
+    , hstream:hstream-lib-rawstring
+    , http-client
+    , memory
+    , optparse-applicative
+    , proto3-suite
+    , proto3-wire
+    , stm
+    , suspend
+    , text
+    , timers
+    , vector
+    , Z-Data
+    , zoovisitor
+
+  if flag(hstream_use_grpc_haskell)
+    cpp-options: -DHStreamUseGrpcHaskell
+
+  if flag(hstream_enable_asan)
+    cpp-options: -DHSTREAM_ENABLE_ASAN
+
+  default-language: Haskell2010
+
+executable hstream-server
+  if flag(hstream_enable_asan)
+    import: shared-properties, link-asan
+
+  if !flag(hstream_enable_asan)
+    import: shared-properties
+
+  main-is:          app/server.hs
+  build-depends:
+    , async
+    , base
+    , bytestring
+    , containers
+    , cryptonite
+    , deepseq
+    , grpc-haskell
+    , grpc-haskell-core
+    , hs-grpc-server
+    , hstream-admin-server
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-server
+    , hstream-common-stats
+    , hstream-gossip
+    , hstream-kafka
+    , hstream-store
+    , hstream:{hstream, hstream-app, hstream-lib-rawstring}
+    , http-client
+    , memory
+    , optparse-applicative
+    , proto3-suite
+    , proto3-wire
+    , stm
+    , suspend
+    , text
+    , timers
+    , vector
+    , Z-Data
+    , zoovisitor
+
+  if flag(hstream_use_grpc_haskell)
+    cpp-options: -DHStreamUseGrpcHaskell
+
+  if flag(hstream_enable_asan)
+    cpp-options: -DHSTREAM_ENABLE_ASAN
+
+  default-language: Haskell2010
+  ghc-options:
+    -threaded -rtsopts "-with-rtsopts=-N -A128m -n4m -qg -qn1"
+
+executable hstream
+  import:           shared-properties
+  main-is:          app/client.hs
+  build-depends:
+    , aeson
+    , ansi-terminal
+    , base
+    , bytestring
+    , containers
+    , grpc-haskell
+    , grpc-haskell-core
+    , haskeline
+    , hstream-admin-server
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-stats
+    , hstream-sql
+    , hstream-store
+    , hstream:{hstream, hstream-lib-rawstring}
+    , network
+    , optparse-applicative
+    , proto3-suite
+    , random
+    , split
+    , text
+    , unix
+    , unordered-containers
+    , vector
+    , Z-Data
+
+  default-language: Haskell2010
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+executable hstream-kafka
+  if flag(hstream_enable_asan)
+    import: shared-properties, link-asan
+
+  if !flag(hstream_enable_asan)
+    import: shared-properties
+
+  main-is:          app/kafka-client.hs
+  build-depends:
+    , aeson
+    , base                  >=4.11 && <5
+    , bytestring
+    , hstream-common-base
+    , hstream-kafka
+    , optparse-applicative
+    , text
+    , vector
+
+  if flag(hstream_use_grpc_haskell)
+    cpp-options: -DHStreamUseGrpcHaskell
+
+  if flag(hstream_enable_asan)
+    cpp-options: -DHSTREAM_ENABLE_ASAN
+
+  default-language: GHC2021
+  ghc-options:      -threaded -rtsopts -with-rtsopts=-N
+
+test-suite hstream-test
+  import:             shared-properties
+  type:               exitcode-stdio-1.0
+  main-is:            Spec.hs
+  other-modules:
+    HStream.AckSpec
+    HStream.AdminCommandSpec
+    HStream.ConfigSpec
+    HStream.HandlerSpec
+    HStream.RegressionNewSpec
+    HStream.RegressionSpec
+    HStream.RunQuerySpec
+    HStream.RunSQLNewSpec
+    HStream.RunSQLSpec
+    HStream.SpecUtils
+    HStream.StatsIntegrationSpec
+
+  hs-source-dirs:     test
+  build-depends:
+    , aeson
+    , aeson-pretty
+    , async
+    , base                  >=4.11 && <5
+    , bytestring
+    , containers
+    , grpc-haskell
+    , grpc-haskell-core
+    , hspec
+    , hstream
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , hstream-common-stats
+    , hstream-gossip
+    , hstream-io
+    , hstream-sql
+    , hstream-store
+    , io-streams
+    , proto3-suite
+    , QuickCheck
+    , random                ^>=1.2
+    , scientific
+    , text
+    , unix
+    , unordered-containers
+    , vector
+    , yaml
+    , Z-Data
+    , zoovisitor
+
+  if impl(ghc <9.2.0)
+    build-depends: hstream-admin-store
+
+  default-language:   Haskell2010
+  default-extensions:
+    DeriveGeneric
+    DerivingStrategies
+    EmptyDataDeriving
+    GADTSyntax
+    GeneralizedNewtypeDeriving
+    LambdaCase
+    OverloadedStrings
+    RecordWildCards
+    ScopedTypeVariables
+    TypeApplications
+    UnliftedFFITypes
+
+  build-tool-depends: hspec-discover:hspec-discover >=2 && <3
+  ghc-options:        -threaded -rtsopts -with-rtsopts=-N

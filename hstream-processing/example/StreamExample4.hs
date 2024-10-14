@@ -24,7 +24,7 @@ import           System.Random
 
 data R = R
   { temperature :: Int,
-    humidity :: Int
+    humidity    :: Int
   }
   deriving (Generic, Show, Typeable)
 
@@ -62,43 +62,43 @@ main = do
           { serializer = Serializer TLE.encodeUtf8,
             deserializer = Deserializer TLE.decodeUtf8
           } ::
-          Serde TL.Text
+          Serde TL.Text BL.ByteString
   let rSerde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R
+          Serde R BL.ByteString
   let r1Serde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R1
+          Serde R1 BL.ByteString
   let r2Serde =
         Serde
           { serializer = Serializer encode,
             deserializer = Deserializer $ fromJust . decode
           } ::
-          Serde R2
-  let tTopicName = "temperature-source"
-  let hTopicName = "humidity-source"
-  let sTopicName = "demo-sink"
+          Serde R2 BL.ByteString
+  let tStreamName = "temperature-source"
+  let hStreamName = "humidity-source"
+  let sStreamName = "demo-sink"
   let streamSourceConfig1 =
         HS.StreamSourceConfig
-          { sscTopicName = tTopicName,
+          { sscStreamName = tStreamName,
             sscKeySerde = textSerde,
             sscValueSerde = r1Serde
           }
   let streamSourceConfig2 =
         HS.StreamSourceConfig
-          { sscTopicName = hTopicName,
+          { sscStreamName = hStreamName,
             sscKeySerde = textSerde,
             sscValueSerde = r2Serde
           }
   let streamSinkConfig =
         HS.StreamSinkConfig
-          { sicTopicName = sTopicName,
+          { sicStreamName = sStreamName,
             sicKeySerde = textSerde,
             sicValueSerde = rSerde
           }
@@ -137,7 +137,7 @@ main = do
         writeRecord
           sinkConnector
           SinkRecord
-            { snkStream = hTopicName,
+            { snkStream = hStreamName,
               snkKey = mmKey,
               snkValue = encode $ R2 {r2Humidity = humidity ((fromJust . decode) mmValue :: R)},
               snkTimestamp = mmTimestamp
@@ -145,7 +145,7 @@ main = do
         writeRecord
           sinkConnector
           SinkRecord
-            { snkStream = tTopicName,
+            { snkStream = tStreamName,
               snkKey = mmKey,
               snkValue = encode $ R1 {r1Temperature = temperature ((fromJust . decode) mmValue :: R)},
               snkTimestamp = mmTimestamp
@@ -154,7 +154,7 @@ main = do
   _ <- async $
     forever $
       do
-        subscribeToStream sourceConnector1 sTopicName Earlist
+        subscribeToStream sourceConnector1 sStreamName Earlist
         records <- readRecords sourceConnector1
         forM_ records $ \SourceRecord {..} ->
           P.putStr "detect abnormal data: " >> BL.putStrLn srcValue

@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package hstream.server.internal;
+
+import "HStream/Server/HStreamApi.proto";
+
+message ServerNode {
+  uint32 id = 1;
+  hstream.server.HStreamVersion version = 2; 
+  uint32 port = 3;
+  uint32 gossipPort = 4;
+  bytes advertisedAddress = 5;
+  bytes gossipAddress = 6;
+  map<string, ListOfListener> advertisedListeners = 7;
+}
+
+message Listener {
+  string address = 1;
+  int32 port = 2;
+}
+
+message ListOfListener {
+  repeated Listener listeners = 2;
+}

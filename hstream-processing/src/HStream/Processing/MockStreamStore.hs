@@ -22,8 +22,8 @@ import qualified RIO.Text                     as T
 
 data MockMessage = MockMessage
   { mmTimestamp :: Timestamp,
-    mmKey :: Maybe BL.ByteString,
-    mmValue :: BL.ByteString
+    mmKey       :: Maybe BL.ByteString,
+    mmValue     :: BL.ByteString
   }
 
 data MockStreamStore = MockStreamStore
@@ -49,19 +49,22 @@ mkMockStoreSourceConnector mockStore = do
         commitCheckpoint = commitCheckpointMock consumer
       }
 
+mkMockStoreSourceConnectorWithoutCkp :: MockStreamStore -> IO SourceConnectorWithoutCkp
+mkMockStoreSourceConnectorWithoutCkp mockStore = undefined
+
 mkMockStoreSinkConnector :: MockStreamStore -> IO SinkConnector
 mkMockStoreSinkConnector mockStore = do
   producer <- mkMockProducer mockStore
   return $
     SinkConnector
-      { writeRecord = writeRecordMock producer
+      { writeRecord = \_ _ -> writeRecordMock producer
       }
 
 -- 实现的时候都要传一个隐式的 共享的 client 进去的，
 -- 状态是可变的
 data MockConsumer = MockConsumer
   { mcSubscribedStreams :: IORef (HS.HashSet StreamName),
-    mcStore :: MockStreamStore
+    mcStore             :: MockStreamStore
   }
 
 mkMockConsumer :: MockStreamStore -> IO MockConsumer

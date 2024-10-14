@@ -2,19 +2,21 @@
 {-# LANGUAGE StrictData        #-}
 
 module HStream.Processing.Error
-  ( HStreamError (..),
+  ( HStreamProcessingError (..),
   )
 where
 
 import           RIO
 
-data HStreamError
+data HStreamProcessingError
   = TaskTopologyBuildError Text
   | UnSupportedMessageStoreError Text
   | UnSupportedStateStoreError Text
   | TypeCastError Text
   | UnExpectedStateStoreType Text
+  | OperationError Text
+  | ImpossibleError
   | UnknownError Text
   deriving (Show)
 
-instance Exception HStreamError
+instance Exception HStreamProcessingError

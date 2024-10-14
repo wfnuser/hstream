@@ -1,0 +1,78 @@
+cabal-version:      2.4
+name:               hstream-gossip
+version:            0.1.0.0
+synopsis:           SWIM based hstream server cluster probe and gossip library
+license:            BSD-3-Clause
+copyright:          Copyright (c) 2020 EMQ Technologies Co., Ltd.
+author:             Time Hoo
+maintainer:         husj@emqx.io
+extra-source-files: CHANGELOG.md
+
+flag ReleaseBuild
+  default:     False
+  description:
+    Enables all optimisations, leads to slower build time and better performance
+
+flag hstream_use_grpc_haskell
+  default:     False
+  description: Use grpc_haskell instead
+
+common shared-properties
+  ghc-options:
+    -Wall -Wcompat -Widentities -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
+
+  if flag(releasebuild)
+    ghc-options:
+      -feager-blackholing -flate-dmd-anal -flate-specialise
+      -fspec-constr-keen -fstatic-argument-transformation
+      -funbox-strict-fields -O2
+
+library
+  import:           shared-properties
+  exposed-modules:
+    HStream.Gossip
+    HStream.Gossip.Client.Types
+    HStream.Gossip.Gossip
+    HStream.Gossip.Handlers
+    HStream.Gossip.Probe
+    HStream.Gossip.Reconnect
+    HStream.Gossip.Server.Handlers
+    HStream.Gossip.Start
+    HStream.Gossip.Types
+    HStream.Gossip.Utils
+    HStream.Gossip.Worker
+
+  if flag(hstream_use_grpc_haskell)
+    cpp-options: -DHStreamUseGrpcHaskell
+
+  -- LANGUAGE extensions used by modules in this package.
+  -- other-extensions:
+  default-language: Haskell2010
+  build-depends:
+    , async
+    , base
+    , bytestring
+    , cereal
+    , containers
+    , deepseq
+    , grpc-haskell
+    , hs-grpc-server
+    , hstream-api-hs
+    , hstream-common
+    , hstream-common-base
+    , optparse-applicative
+    , proto3-suite
+    , proto3-wire
+    , random
+    , random-shuffle
+    , slave-thread          ^>=1.1
+    , stm
+    , table-layout
+    , text
+    , time
+    , unordered-containers
+    , vector
+    , Z-Data
+
+  hs-source-dirs:   src

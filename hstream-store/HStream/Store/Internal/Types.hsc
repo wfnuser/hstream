@@ -1,32 +1,51 @@
+{-# LANGUAGE CApiFFI         #-}
 {-# LANGUAGE CPP             #-}
-{-# LANGUAGE DeriveAnyClass  #-}
+{-# LANGUAGE DataKinds       #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE UnboxedTuples   #-}
 
+-- FIXME: consider this: split this module into a new
+-- HStream.Store.Internal.LogDevice.Types
 module HStream.Store.Internal.Types where
 
-import           Control.Exception     (bracket, finally)
-import           Control.Monad         (forM, when)
+import           Control.Exception        (bracket, finally)
+import           Control.Monad            (when)
+import qualified Data.ByteString          as BS
+import qualified Data.ByteString.Internal as BS
 import           Data.Int
-import           Data.Map.Strict       (Map)
+import           Data.Primitive
 import           Data.Word
 import           Foreign.C
 import           Foreign.ForeignPtr
 import           Foreign.Marshal.Alloc
 import           Foreign.Ptr
 import           Foreign.Storable
-import           Z.Data.CBytes         (CBytes)
-import qualified Z.Data.CBytes         as CBytes
-import           Z.Data.Vector         (Bytes)
-import qualified Z.Data.Vector         as Vec
-import qualified Z.Foreign             as Z
+import qualified Text.Read                as Read
+import           Z.Data.CBytes            (CBytes)
+import qualified Z.Data.CBytes            as CBytes
+import           Z.Data.Vector            (Bytes)
+import qualified Z.Data.Vector            as Vec
+import qualified Z.Foreign                as Z
+
+-------------------------------------------------------------------------------
 
 #include "hs_logdevice.h"
+
+#define hsc_const_pattern(ns, cls, val)                                        \
+    hsc_printf("pattern %s_%s :: %s\n", #cls, #val, #cls);                     \
+    hsc_printf("pattern %s_%s = %s %lld\n", #cls, #val, #cls, ns::cls::val);
+
+#define hsc_const_show(cls, val)                                               \
+   hsc_printf("  show %s_%s = \"%s\"\n", #cls, #val, #val);
 
 -------------------------------------------------------------------------------
 
 type LDClient = ForeignPtr LogDeviceClient
 type LDLogGroup = ForeignPtr LogDeviceLogGroup
+type LDLogsConfigAttr = ForeignPtr LogDeviceLogsConfigAttr
 type LDLogAttrs = ForeignPtr LogDeviceLogAttributes
+type LDLogHeadAttrs = ForeignPtr LogDeviceLogHeadAttributes
+type LDLogTailAttrs = ForeignPtr LogDeviceLogTailAttributes
 type LDVersionedConfigStore = ForeignPtr LogDeviceVersionedConfigStore
 type LDDirectory = ForeignPtr LogDeviceLogDirectory
 type LDReader = ForeignPtr LogDeviceReader
@@ -43,8 +62,11 @@ instance Bounded LogID where
   minBound = LOGID_MIN
   maxBound = LOGID_MAX
 
+pattern C_LOGID_MIN :: C_LogID
+pattern C_LOGID_MIN = 1
+
 pattern LOGID_MIN :: LogID
-pattern LOGID_MIN = LogID 1
+pattern LOGID_MIN = LogID C_LOGID_MIN
 
 -- | Max valid user data logid value.
 --
@@ -91,14 +113,15 @@ pattern LSN_MAX = (#const C_LSN_MAX)
 pattern LSN_INVALID :: LSN
 pattern LSN_INVALID = (#const C_LSN_INVALID)
 
+data RecordByteOffset
+  = RecordByteOffset Word64
+  | RecordByteOffsetInvalid
+  deriving (Show, Eq)
+
+pattern C_BYTE_OFFSET_INVALID :: Word64
+pattern C_BYTE_OFFSET_INVALID = (#const facebook::logdevice::BYTE_OFFSET_INVALID)
+
 type C_LogsConfigVersion = Word64
-
-data HsLogAttrs = HsLogAttrs
-  { logReplicationFactor :: Int
-  , logExtraAttrs        :: Map CBytes CBytes
-  } deriving (Show)
-
-data LogAttrs = LogAttrs HsLogAttrs | LogAttrsPtr LDLogAttrs
 
 data VcsValueCallbackData = VcsValueCallbackData
   { vcsValCallbackSt  :: !ErrorCode
@@ -147,9 +170,6 @@ peekVcsWriteCallbackData ptr = bracket getSt release peekData
 
 -------------------------------------------------------------------------------
 
-newtype StreamClient = StreamClient
-  { unStreamClient :: ForeignPtr LogDeviceClient }
-
 newtype StreamAdminClient = StreamAdminClient
   { unStreamAdminClient :: ForeignPtr LogDeviceAdminAsyncClient }
 
@@ -160,48 +180,167 @@ newtype StreamSyncCheckpointedReader = StreamSyncCheckpointedReader
   { unStreamSyncCheckpointedReader :: ForeignPtr LogDeviceSyncCheckpointedReader }
   deriving (Show, Eq)
 
-newtype StreamReader = StreamReader
-  { unStreamReader :: ForeignPtr LogDeviceReader }
-  deriving (Show, Eq)
-
 newtype CheckpointStore = CheckpointStore
   { unCheckpointStore :: ForeignPtr LogDeviceCheckpointStore }
   deriving (Show, Eq)
 
-data DataRecord = DataRecord
-  { recordLogID   :: !C_LogID
-  , recordLSN     :: !LSN
-  , recordPayload :: !Bytes
+data DataRecordAttr = DataRecordAttr
+  { recordAttrLogID       :: {-# UNPACK #-} !C_LogID
+  , recordAttrLSN         :: {-# UNPACK #-} !LSN
+  , recordAttrTimestamp   :: {-# UNPACK #-} !C_Timestamp
+  , recordAttrBatchOffset :: {-# UNPACK #-} !Int
+  , recordAttrByteOffset  :: !RecordByteOffset
+  -- ^ Contains information on the amount of data written to the log
+  -- (to which this record belongs) up to this record.
+  -- BYTE_OFFSET will be invalid if this attribute was not requested by client
+  -- (see includeByteOffset() reader option) or if it is not available to
+  -- storage nodes.
+  } deriving (Show, Eq)
+
+recordLogID :: DataRecord a -> C_LogID
+recordLogID = recordAttrLogID . recordAttr
+
+recordLSN :: DataRecord a -> LSN
+recordLSN = recordAttrLSN . recordAttr
+
+recordTimestamp :: DataRecord a -> C_Timestamp
+recordTimestamp = recordAttrTimestamp . recordAttr
+
+recordBatchOffset :: DataRecord a -> Int
+recordBatchOffset = recordAttrBatchOffset . recordAttr
+
+recordByteOffset :: DataRecord a -> RecordByteOffset
+recordByteOffset = recordAttrByteOffset . recordAttr
+
+data DataRecordInternal
+
+data DataRecord a = DataRecord
+  { recordPayload :: !a
+  , recordAttr    :: !DataRecordAttr
   } deriving (Show, Eq)
 
 dataRecordSize :: Int
 dataRecordSize = (#size logdevice_data_record_t)
 
-peekDataRecords :: Int -> Ptr DataRecord -> IO [DataRecord]
-peekDataRecords len ptr = forM [0..len-1] (peekDataRecord ptr)
+peekDataRecordAttr :: Ptr DataRecordInternal -> IO DataRecordAttr
+peekDataRecordAttr ptr = do
+  logid <- (#peek logdevice_data_record_t, logid) ptr
+  lsn <- (#peek logdevice_data_record_t, lsn) ptr
+  timestamp <- (#peek logdevice_data_record_t, timestamp) ptr
+  batchOffset <- (#peek logdevice_data_record_t, batch_offset) ptr
+  byteOffset' <- (#peek logdevice_data_record_t, byte_offset) ptr
+  let byteOffset = case byteOffset' of
+                     C_BYTE_OFFSET_INVALID -> RecordByteOffsetInvalid
+                     x -> RecordByteOffset x
+  return $ DataRecordAttr logid lsn timestamp batchOffset byteOffset
 
 -- | Peek data record from a pointer and an offset, then release the payload
 -- ignoring exceptions.
-peekDataRecord :: Ptr DataRecord -> Int -> IO DataRecord
+peekDataRecord :: Ptr DataRecordInternal -> Int -> IO (DataRecord Bytes)
 peekDataRecord ptr offset = finally peekData release
   where
     ptr' = ptr `plusPtr` (offset * dataRecordSize)
     peekData = do
-      logid <- (#peek logdevice_data_record_t, logid) ptr'
-      lsn <- (#peek logdevice_data_record_t, lsn) ptr'
       len <- (#peek logdevice_data_record_t, payload_len) ptr'
       payload <- flip Z.fromPtr len =<< (#peek logdevice_data_record_t, payload) ptr'
-      return $ DataRecord logid lsn payload
+      attr <- peekDataRecordAttr ptr'
+      return $ DataRecord payload attr
     release = do
       payload_ptr <- (#peek logdevice_data_record_t, payload) ptr'
       free payload_ptr
+
+peekDataRecordBS :: Ptr DataRecordInternal -> Int -> IO (DataRecord BS.ByteString)
+peekDataRecordBS ptr offset = do
+  let ptr' = ptr `plusPtr` (offset * dataRecordSize)
+  len <- (#peek logdevice_data_record_t, payload_len) ptr'
+  payload_ptr <- newForeignPtr finalizerFree =<<
+                 (#peek logdevice_data_record_t, payload) ptr'
+  -- the offset of bytestring is always zero
+  let payload = BS.PS payload_ptr 0 len
+  attr <- peekDataRecordAttr ptr'
+  return $ DataRecord payload attr
+
+data GapRecord = GapRecord
+  { gapLogID :: {-# UNPACK #-} !C_LogID
+  , gapType  :: {-# UNPACK #-} !GapType
+  , gapLoLSN :: {-# UNPACK #-} !LSN
+  , gapHiLSN :: {-# UNPACK #-} !LSN
+  } deriving (Show, Eq)
+
+newtype GapType = GapType Word8
+  deriving (Eq)
+
+-- | Default gap type; used by storage nodes when they don't have enough
+-- information to determine gap type
+pattern GapTypeUnknown :: GapType
+pattern GapTypeUnknown = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::UNKNOWN))
+
+-- | A "bridge" that completes an epoch. This is benign and could be a result of
+-- sequencer failover or log reconfiguration. There is no data loss.
+pattern GapTypeBridge :: GapType
+pattern GapTypeBridge = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::BRIDGE))
+
+-- | A hole in the numbering sequence that appeared due to a sequencer crash. No
+-- acknowledged records were lost.
+pattern GapTypeHole :: GapType
+pattern GapTypeHole = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::HOLE))
+
+-- | All records in the gap were permanently lost
+pattern GapTypeDataloss :: GapType
+pattern GapTypeDataloss = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::DATALOSS))
+
+-- | A gap caused by trimming the log
+pattern GapTypeTrim :: GapType
+pattern GapTypeTrim = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::TRIM))
+
+-- | A gap sent when the client does not have the required permissions
+pattern GapTypeAccess :: GapType
+pattern GapTypeAccess = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::ACCESS))
+
+-- | A gap issued up to until_lsn if the log was removed from the config
+pattern GapTypeNotInConfig :: GapType
+pattern GapTypeNotInConfig = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::NOTINCONFIG))
+
+-- | A gap issued when this record is filtered out by server side filtering feature
+pattern GapTypeFilteredOut :: GapType
+pattern GapTypeFilteredOut = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::FILTERED_OUT))
+
+pattern GapTypeMax :: GapType
+pattern GapTypeMax = GapType (#const static_cast<uint8_t>(facebook::logdevice::GapType::MAX))
+
+instance Show GapType where
+  show (GapType 0) = "Unknown"
+  show (GapType 1) = "Bridge"
+  show (GapType 2) = "Hole"
+  show (GapType 3) = "DataLoss"
+  show (GapType 4) = "Trim"
+  show (GapType 5) = "Access"
+  show (GapType 6) = "NotInConfig"
+  show (GapType 7) = "FilteredOut"
+  show (GapType 8) = "Max"
+  show _           = "Impossible Gap Type"
+
+gapRecordSize :: Int
+gapRecordSize = (#size logdevice_gap_record_t)
+
+peekGapRecord :: Ptr GapRecord -> IO GapRecord
+peekGapRecord ptr = do
+  logid <- (#peek logdevice_gap_record_t, logid) ptr
+  gaptype <- (#peek logdevice_gap_record_t, gaptype) ptr
+  lo <- (#peek logdevice_gap_record_t, lo) ptr
+  hi <- (#peek logdevice_gap_record_t, hi) ptr
+  return $ GapRecord { gapLogID = logid
+                     , gapType  = GapType gaptype
+                     , gapHiLSN = hi
+                     , gapLoLSN = lo
+                     }
 
 data AppendCallBackData = AppendCallBackData
   { appendCbRetCode   :: !ErrorCode
   , appendCbLogID     :: !C_LogID
   , appendCbLSN       :: !LSN
   , appendCbTimestamp :: !C_Timestamp
-  }
+  } deriving (Show)
 
 appendCallBackDataSize :: Int
 appendCallBackDataSize = (#size logdevice_append_cb_data_t)
@@ -253,10 +392,10 @@ peekMakeLogGroupCbData ptr = finally peekData release
     release = free =<< (#peek make_loggroup_cb_data_t, failure_reason) ptr
 
 data MakeDirectoryCbData = MakeDirectoryCbData
-   { makeDirectoryCbRetCode :: !ErrorCode
-   , makeDirectoryCbDirPtr :: !(Ptr LogDeviceLogDirectory)
-   , makeDirectoryFailInfo :: !CBytes
-   }
+  { makeDirectoryCbRetCode :: !ErrorCode
+  , makeDirectoryCbDirPtr :: !(Ptr LogDeviceLogDirectory)
+  , makeDirectoryFailInfo :: !CBytes
+  }
 
 makeDirectoryCbDataSize :: Int
 makeDirectoryCbDataSize = (#size make_directory_cb_data_t)
@@ -271,6 +410,48 @@ peekMakeDirectoryCbData ptr = do
   free failinfo_ptr
   return $ MakeDirectoryCbData retcode directory_ptr failinfo
 
+data LogHeadAttrsCbData = LogHeadAttrsCbData
+  { logHeadAttributesCbRetCode :: !ErrorCode
+  , logHeadAttributesCbAttrPtr :: !(Ptr LogDeviceLogHeadAttributes)
+  }
+
+logHeadAttrsCbDataSize :: Int
+logHeadAttrsCbDataSize = (#size log_head_attributes_cb_data_t)
+
+peekLogHeadAttrsCbData :: Ptr LogHeadAttrsCbData -> IO LogHeadAttrsCbData
+peekLogHeadAttrsCbData ptr = do
+  retcode <- (#peek log_head_attributes_cb_data_t, st) ptr
+  head_attributes_ptr <- (#peek log_head_attributes_cb_data_t, head_attributes) ptr
+  return $ LogHeadAttrsCbData retcode head_attributes_ptr
+
+data LogTailAttrsCbData = LogTailAttrsCbData
+  { logTailAttributesCbRetCode :: !ErrorCode
+  , logTailAttributesCbAttrPtr :: !(Ptr LogDeviceLogTailAttributes)
+  }
+
+logTailAttrsCbDataSize :: Int
+logTailAttrsCbDataSize = (#size log_tail_attributes_cb_data_t)
+
+peekLogTailAttrsCbData :: Ptr LogTailAttrsCbData -> IO LogTailAttrsCbData
+peekLogTailAttrsCbData ptr = do
+  retcode <- (#peek log_tail_attributes_cb_data_t, st) ptr
+  tail_attributes_ptr <- (#peek log_tail_attributes_cb_data_t, tail_attributes) ptr
+  return $ LogTailAttrsCbData retcode tail_attributes_ptr
+
+data IsLogEmptyCbData = IsLogEmptyCbData
+  { isLogEmptyCbRetCode :: !ErrorCode
+  , isLogEmptyCbAttrPtr :: !CBool
+  }
+
+isLogEmptyCbDataSize :: Int
+isLogEmptyCbDataSize = (#size is_log_empty_cb_data_t)
+
+peekIsLogEmptyCbData :: Ptr IsLogEmptyCbData -> IO IsLogEmptyCbData
+peekIsLogEmptyCbData ptr = do
+  retcode <- (#peek is_log_empty_cb_data_t, st) ptr
+  empty <- (#peek is_log_empty_cb_data_t, empty) ptr
+  return $ IsLogEmptyCbData retcode empty
+
 -------------------------------------------------------------------------------
 
 data LogDeviceClient
@@ -279,33 +460,103 @@ data LogDeviceSyncCheckpointedReader
 data LogDeviceVersionedConfigStore
 data LogDeviceLogGroup
 data LogDeviceLogDirectory
+-- facebook::logdevice::logsconfig::Attribute
+data LogDeviceLogsConfigAttr
+-- facebook::logdevice::logsconfig::LogAttributes
 data LogDeviceLogAttributes
+data LogDeviceLogHeadAttributes
+data LogDeviceLogTailAttributes
 data LogDeviceCheckpointStore
 data LogDeviceAdminAsyncClient
 data ThriftRpcOptions
 
 type C_Timestamp = Int64
 
-newtype KeyType = KeyType Word8
+pattern C_MAX_MILLISECONDS :: C_Timestamp
+pattern C_MAX_MILLISECONDS = (#const MAX_MILLISECONDS)
+
+newtype KeyType = KeyType { unKeyType :: Word8 }
   deriving (Eq, Ord)
 
 instance Show KeyType where
-  show t
-    | t == keyTypeFindKey = "FINDKEY"
-    | t == keyTypeFilterable = "FILTERABLE"
-    | otherwise = "UNDEFINED"
+  show KeyTypeFindKey    = "FINDKEY"
+  show KeyTypeFilterable = "FILTERABLE"
+  show KeyTypeUndefined  = "UNDEFINED"
+  show KeyTypeMax        = "MAX"
+  show _                 = "Unknown"
 
-keyTypeFindKey :: KeyType
-keyTypeFindKey = KeyType c_keytype_findkey
+pattern KeyTypeFindKey :: KeyType
+pattern KeyTypeFindKey = KeyType (#const static_cast<HsWord8>(KeyType::FINDKEY))
 
-keyTypeFilterable :: KeyType
-keyTypeFilterable = KeyType c_keytype_filterable
+pattern KeyTypeFilterable :: KeyType
+pattern KeyTypeFilterable = KeyType (#const static_cast<HsWord8>(KeyType::FILTERABLE))
 
-c_keytype_findkey :: Word8
-c_keytype_findkey = (#const C_KeyType_FINDKEY)
+pattern KeyTypeMax :: KeyType
+pattern KeyTypeMax = KeyType (#const static_cast<HsWord8>(KeyType::MAX))
 
-c_keytype_filterable :: Word8
-c_keytype_filterable = (#const C_KeyType_FILTERABLE)
+pattern KeyTypeUndefined :: KeyType
+pattern KeyTypeUndefined = KeyType (#const static_cast<HsWord8>(KeyType::UNDEFINED))
+
+-- (compression_enum, zstd_level)
+type C_Compression = (Int, Int)
+
+data Compression
+  = CompressionNone
+  | CompressionZSTD Int
+  | CompressionLZ4
+  | CompressionLZ4HC
+  deriving (Eq, Ord, Show)
+
+instance Read Compression where
+  readPrec = do
+    i <- Read.lexP
+    case i of
+      Read.Ident "none"  -> return CompressionNone
+      Read.Ident "lz4"   -> return CompressionLZ4
+      Read.Ident "lz4hc" -> return CompressionLZ4HC
+      Read.Ident "zstd" -> do
+        Read.Symbol ":" <- Read.lexP
+        CompressionZSTD <$> Read.readPrec
+      x -> errorWithoutStackTrace $ "cannot parse value: " <> show x
+
+fromCompression :: Compression -> C_Compression
+fromCompression CompressionNone = ((#const static_cast<HsInt>(Compression::NONE)), 0)
+fromCompression (CompressionZSTD lvl) = ((#const static_cast<HsWord8>(Compression::ZSTD)), lvl)
+fromCompression CompressionLZ4 = ((#const static_cast<HsInt>(Compression::LZ4)), 0)
+fromCompression CompressionLZ4HC = ((#const static_cast<HsInt>(Compression::LZ4_HC)), 0)
+
+-------------------------------------------------------------------------------
+
+-- FIXME: consider this: using hsthrift generated code
+newtype NodeLocationScope = NodeLocationScope { unNodeLocationScope :: Word8 }
+  deriving (Eq, Ord, Prim)
+
+-- a special scope indicating the smallest scope: an individual node
+#const_pattern facebook::logdevice, NodeLocationScope, NODE
+
+-- actual (non-special) scopes representing the location of a node
+#const_pattern facebook::logdevice, NodeLocationScope, RACK
+#const_pattern facebook::logdevice, NodeLocationScope, ROW
+#const_pattern facebook::logdevice, NodeLocationScope, CLUSTER
+#const_pattern facebook::logdevice, NodeLocationScope, DATA_CENTER
+#const_pattern facebook::logdevice, NodeLocationScope, REGION
+
+-- the root scope is a special scope which guarantees to cover all other
+-- scopes defined
+#const_pattern facebook::logdevice, NodeLocationScope, ROOT
+
+#const_pattern facebook::logdevice, NodeLocationScope, INVALID
+
+instance Show NodeLocationScope where
+#const_show NodeLocationScope, NODE
+#const_show NodeLocationScope, RACK
+#const_show NodeLocationScope, ROW
+#const_show NodeLocationScope, CLUSTER
+#const_show NodeLocationScope, DATA_CENTER
+#const_show NodeLocationScope, REGION
+#const_show NodeLocationScope, ROOT
+#const_show NodeLocationScope, INVALID
+  show (NodeLocationScope x) = "Unknown NodeLocationScope: " <> show x
 
 -------------------------------------------------------------------------------
 
@@ -571,32 +822,17 @@ foreign import ccall unsafe "hs_logdevice.h dbg_use_fd"
 
 -------------------------------------------------------------------------------
 
-newtype FB_STATUS = FB_STATUS { unFB_STATUS :: CInt}
-  deriving newtype (Eq, Num)
+pattern C_ACCURACY_STRICT :: Int
+pattern C_ACCURACY_STRICT = (#const static_cast<HsInt>(facebook::logdevice::FindKeyAccuracy::STRICT))
 
-instance Show FB_STATUS where
-  show FB_STATUS_STARTING = "FB_STATUS_STARTING"
-  show FB_STATUS_ALIVE    = "FB_STATUS_ALIVE"
-  show FB_STATUS_DEAD     = "FB_STATUS_DEAD"
-  show FB_STATUS_STOPPING = "FB_STATUS_STOPPING"
-  show FB_STATUS_STOPPED  = "FB_STATUS_STOPPED"
-  show FB_STATUS_WARNING  = "FB_STATUS_WARNING"
-  show _                  = "UNDEFINED_FB_STATUS"
+pattern C_ACCURACY_APPROXIMATE :: Int
+pattern C_ACCURACY_APPROXIMATE = (#const static_cast<HsInt>(facebook::logdevice::FindKeyAccuracy::APPROXIMATE))
 
-pattern FB_STATUS_STARTING :: FB_STATUS
-pattern FB_STATUS_STARTING = (#const static_cast<int>(fb_status::STARTING))
+data FindKeyAccuracy
+  = FindKeyStrict
+  | FindKeyApproximate
+  deriving (Show)
 
-pattern FB_STATUS_ALIVE :: FB_STATUS
-pattern FB_STATUS_ALIVE = (#const static_cast<int>(fb_status::ALIVE))
-
-pattern FB_STATUS_DEAD :: FB_STATUS
-pattern FB_STATUS_DEAD = (#const static_cast<int>(fb_status::DEAD))
-
-pattern FB_STATUS_STOPPING :: FB_STATUS
-pattern FB_STATUS_STOPPING = (#const static_cast<int>(fb_status::STOPPING))
-
-pattern FB_STATUS_STOPPED :: FB_STATUS
-pattern FB_STATUS_STOPPED = (#const static_cast<int>(fb_status::STOPPED))
-
-pattern FB_STATUS_WARNING :: FB_STATUS
-pattern FB_STATUS_WARNING = (#const static_cast<int>(fb_status::WARNING))
+unFindKeyAccuracy :: FindKeyAccuracy -> Int
+unFindKeyAccuracy FindKeyStrict = C_ACCURACY_STRICT
+unFindKeyAccuracy FindKeyApproximate = C_ACCURACY_APPROXIMATE
